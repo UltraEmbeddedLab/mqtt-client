@@ -70,9 +70,9 @@ jobs:
           fi
 
       # --min is what makes coverage a gate; without it the run reports and passes.
-      # TODO: raise to the value the first green run reports, minus a small margin.
+      # Measured 53.5% with the broker running. Ratchet upward, never down.
       - name: Run tests with coverage
-        run: vendor/bin/pest --coverage --coverage-clover=coverage.xml --min=35
+        run: vendor/bin/pest --coverage --coverage-clover=coverage.xml --min=50
 
       - name: Upload coverage to Codecov
         if: matrix.php == '8.4'

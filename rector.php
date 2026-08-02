@@ -17,13 +17,17 @@ return RectorConfig::configure()
     // constants. Same rule coverage, but the target version is declarative — moving to
     // PHP 8.5 later is a one-word change here.
     ->withPhpSets(php84: true)
+    // strictBooleans was dropped: Rector deprecates it as "mostly risky and not practical"
+    // and points at codeQuality, which already carries granular, stable equivalents.
+    // Its other suggestion, codingStyle, is deliberately NOT enabled — it rewrites string
+    // interpolation into sprintf() across 29 files, against the interpolated style this
+    // codebase standardised on.
     ->withPreparedSets(
         deadCode: true,
         codeQuality: true,
         typeDeclarations: true,
         privatization: true,
         earlyReturn: true,
-        strictBooleans: true,
     )
     ->withSkip([
         // #[\Override] on interface implementations is noise in a library whose contracts

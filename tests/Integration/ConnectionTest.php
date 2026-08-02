@@ -164,18 +164,43 @@ test('subscribe and receive message', function (): void {
 test('unsubscribe stops message delivery', function (): void {
     $topic = 'test/unsub/' . bin2hex(random_bytes(4));
 
-    $options = new Options(
-        host: $this->host,
-        port: $this->port,
-        clientId: 'php-iot-test-unsub-' . bin2hex(random_bytes(4)),
+    $publisher = new Client(
+        new Options(
+            host: $this->host,
+            port: $this->port,
+            clientId: 'php-iot-test-unsub-pub-' . bin2hex(random_bytes(4)),
+        ),
+        new TcpTransport(),
     );
+    $publisher->connect();
 
-    $client = new Client($options, new TcpTransport());
-    $client->connect();
-    $client->subscribe([$topic], 0);
-    $client->unsubscribe([$topic]);
+    $subscriber = new Client(
+        new Options(
+            host: $this->host,
+            port: $this->port,
+            clientId: 'php-iot-test-unsub-sub-' . bin2hex(random_bytes(4)),
+        ),
+        new TcpTransport(),
+    );
+    $subscriber->connect();
+    $subscriber->subscribe([$topic], 0);
+    usleep(100_000);
 
-    $client->disconnect();
+    // While subscribed, the message arrives.
+    $publisher->publish($topic, 'before-unsubscribe');
+    $before = $subscriber->awaitMessage(5.0);
+    expect($before)->not->toBeNull();
+    expect($before->payload)->toBe('before-unsubscribe');
+
+    // After UNSUBACK, the same topic must go quiet.
+    $subscriber->unsubscribe([$topic]);
+    usleep(100_000);
+    $publisher->publish($topic, 'after-unsubscribe');
+
+    expect($subscriber->awaitMessage(1.0))->toBeNull();
+
+    $subscriber->disconnect();
+    $publisher->disconnect();
 });
 
 test('MQTT 5.0 publish with properties', function (): void {
@@ -203,19 +228,49 @@ test('MQTT 5.0 publish with properties', function (): void {
     $client->disconnect();
 });
 
-test('multiple sequential publishes', function (): void {
-    $options = new Options(
-        host: $this->host,
-        port: $this->port,
-        clientId: 'php-iot-test-multi-' . bin2hex(random_bytes(4)),
+test('multiple sequential publishes are all delivered', function (): void {
+    $prefix = 'test/multi/' . bin2hex(random_bytes(4));
+
+    $publisher = new Client(
+        new Options(
+            host: $this->host,
+            port: $this->port,
+            clientId: 'php-iot-test-multi-pub-' . bin2hex(random_bytes(4)),
+        ),
+        new TcpTransport(),
     );
+    $publisher->connect();
 
-    $client = new Client($options, new TcpTransport());
-    $client->connect();
+    $subscriber = new Client(
+        new Options(
+            host: $this->host,
+            port: $this->port,
+            clientId: 'php-iot-test-multi-sub-' . bin2hex(random_bytes(4)),
+        ),
+        new TcpTransport(),
+    );
+    $subscriber->connect();
+    $subscriber->subscribe(["{$prefix}/#"], 1);
+    usleep(100_000);
 
+    // QoS 1 in both directions so the assertion is about delivery, not timing.
     for ($i = 0; $i < 10; $i++) {
-        $client->publish("test/multi/{$i}", "message {$i}");
+        $publisher->publish("{$prefix}/{$i}", "message {$i}", new PublishOptions(qos: QoS::AtLeastOnce));
     }
 
-    $client->disconnect();
+    $received = [];
+    $deadline = microtime(true) + 10.0;
+    while (count($received) < 10 && microtime(true) < $deadline) {
+        $msg = $subscriber->awaitMessage(0.5);
+        if ($msg instanceof \ScienceStories\Mqtt\Client\InboundMessage) {
+            $received[] = $msg->payload;
+        }
+    }
+
+    expect($received)->toHaveCount(10);
+    sort($received);
+    expect($received)->toContain('message 0')->toContain('message 9');
+
+    $subscriber->disconnect();
+    $publisher->disconnect();
 });
