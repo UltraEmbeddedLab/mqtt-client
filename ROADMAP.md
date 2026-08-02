@@ -89,5 +89,5 @@ The client's weakest area is holding a connection open for days rather than minu
 
 ---
 
-Something you need that is not here? [Open an issue](https://github.com/UltraEmbeddedLab/php-iot/issues)
-or start a [discussion](https://github.com/UltraEmbeddedLab/php-iot/discussions).
+Something you need that is not here? [Open an issue](https://github.com/UltraEmbeddedLab/mqtt-client/issues)
+or start a [discussion](https://github.com/UltraEmbeddedLab/mqtt-client/discussions).

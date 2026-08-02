@@ -197,9 +197,9 @@ compiles against 2.0.
 - Easy facade for simple usage
 - Comprehensive examples and documentation
 
-[Unreleased]: https://github.com/UltraEmbeddedLab/php-iot/compare/v2.0.0...HEAD
-[2.0.0]: https://github.com/UltraEmbeddedLab/php-iot/compare/v1.3.0...v2.0.0
-[1.3.0]: https://github.com/UltraEmbeddedLab/php-iot/compare/v1.2.0...v1.3.0
-[1.2.0]: https://github.com/UltraEmbeddedLab/php-iot/compare/v1.1.0...v1.2.0
-[1.1.0]: https://github.com/UltraEmbeddedLab/php-iot/compare/v1.0.0...v1.1.0
-[1.0.0]: https://github.com/UltraEmbeddedLab/php-iot/releases/tag/v1.0.0
+[Unreleased]: https://github.com/UltraEmbeddedLab/mqtt-client/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/UltraEmbeddedLab/mqtt-client/compare/v1.3.0...v2.0.0
+[1.3.0]: https://github.com/UltraEmbeddedLab/mqtt-client/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/UltraEmbeddedLab/mqtt-client/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/UltraEmbeddedLab/mqtt-client/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/UltraEmbeddedLab/mqtt-client/releases/tag/v1.0.0

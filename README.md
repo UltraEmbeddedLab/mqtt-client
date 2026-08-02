@@ -1,6 +1,6 @@
 # PHP IoT MQTT Client
 
-[![CI](https://github.com/UltraEmbeddedLab/php-iot/actions/workflows/ci.yml/badge.svg)](https://github.com/UltraEmbeddedLab/php-iot/actions/workflows/ci.yml)
+[![CI](https://github.com/UltraEmbeddedLab/mqtt-client/actions/workflows/ci.yml/badge.svg)](https://github.com/UltraEmbeddedLab/mqtt-client/actions/workflows/ci.yml)
 [![Latest Stable Version](https://poser.pugx.org/ultraembeddedlab/mqtt-client/v)](https://packagist.org/packages/ultraembeddedlab/mqtt-client)
 [![License](https://poser.pugx.org/ultraembeddedlab/mqtt-client/license)](https://packagist.org/packages/ultraembeddedlab/mqtt-client)
 [![PHP Version](https://img.shields.io/packagist/php-v/ultraembeddedlab/mqtt-client)](https://packagist.org/packages/ultraembeddedlab/mqtt-client)
@@ -400,6 +400,7 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed and what is planned.
 
 Feature guides in `docs/`:
 
+- [Testing](docs/testing.md) — unit-test your MQTT code with `InMemoryTransport`, no broker needed
 - [Flow Control](docs/flow-control.md) — MQTT 5 receive-maximum and in-flight limits
 - [Session Persistence](docs/session-persistence.md) — surviving restarts with `cleanSession: false`
 - [Shared Subscriptions](docs/shared-subscriptions.md) — `$share/` load balancing across consumers

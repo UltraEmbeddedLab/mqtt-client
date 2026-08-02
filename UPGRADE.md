@@ -204,4 +204,4 @@ See [Testing](docs/testing.md).
 - [ ] Brokers stuck on TLS 1.0/1.1 — set `withCryptoMethod()`
 
 Anything unclear or broken by this upgrade is a bug in this guide as much as in the code —
-please [open an issue](https://github.com/UltraEmbeddedLab/php-iot/issues).
+please [open an issue](https://github.com/UltraEmbeddedLab/mqtt-client/issues).

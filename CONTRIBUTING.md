@@ -32,8 +32,8 @@ Small, well-tested fixes are just as welcome as large features.
 Requirements: PHP 8.4+, Composer, and Docker for the integration suite.
 
 ```bash
-git clone https://github.com/UltraEmbeddedLab/php-iot.git
-cd php-iot
+git clone https://github.com/UltraEmbeddedLab/mqtt-client.git
+cd mqtt-client
 composer install
 docker compose up -d --wait   # Mosquitto on 1883, the integration tests need it
 ```
@@ -122,7 +122,7 @@ is still a break.
 
 ## Questions?
 
-Use [Discussions](https://github.com/UltraEmbeddedLab/php-iot/discussions) for questions and
+Use [Discussions](https://github.com/UltraEmbeddedLab/mqtt-client/discussions) for questions and
 usage help. The issue tracker is for bugs and feature requests.
 
 Thank you.
