@@ -92,7 +92,7 @@ final class SubAck
      */
     public function isSuccess(): bool
     {
-        return array_all($this->returnCodes, fn ($code): bool => $code < 0x80);
+        return array_all($this->returnCodes, fn (int $code): bool => $code < 0x80);
     }
 
     /**

@@ -80,7 +80,7 @@ final class UnsubAck
         if ($this->reasonCodes === null) {
             return true;
         }
-        return array_all($this->reasonCodes, fn ($code): bool => !($code !== 0x00 && $code !== 0x11));
+        return array_all($this->reasonCodes, fn (int $code): bool => $code === 0x00 || $code === 0x11);
     }
 
     /**
@@ -93,7 +93,7 @@ final class UnsubAck
         if ($this->reasonCodes === null) {
             return false;
         }
-        return array_any($this->reasonCodes, fn ($code): bool => $code >= 0x80);
+        return array_any($this->reasonCodes, fn (int $code): bool => $code >= 0x80);
     }
 
     /**

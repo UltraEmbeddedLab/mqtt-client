@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — distribution and secure defaults
+
+- **`composer require` failed on the official `php:8.4-cli` and `php:8.4-fpm` images.** `ext-sockets` sat in `require` while nothing in `src/` ever called a `socket_*` function — all I/O goes through `stream_socket_client()`. Removed. `ext-json` (used by `FileSessionStore` and `ConsoleLogger`) is now declared; `ext-openssl` stays a suggestion, since plain TCP does not need it, but both transports now fail with `Cannot enable TLS: ext-openssl is not loaded` instead of a cryptic crypto error. A new CI job installs the package on a stock `php:8.4-cli` container so a phantom extension requirement cannot come back.
+- **`.gitignore` was untracked because it ignored itself**, so a fresh clone had no ignore rules at all and `git add -A` could commit `vendor/`, `.env` and the private keys `examples/certs/generate.sh` produces. The file and `examples/certs/.gitignore` are now tracked. (`CLAUDE.md` remains ignored by intent.)
+- **17 of 20 examples fatally failed on a fresh clone**, requiring a gitignored `examples/config.php` with no committed template. `examples/config.php.dist` is now committed and targets the Mosquitto in `docker-compose.yml`; every example falls back to it. `.env.example` documents all ten variables instead of three.
+- **`examples/config.php.dist` parses booleans with `filter_var()`.** The previous `(bool) $env(...)` made `MQTT_TLS_ALLOW_SELF_SIGNED=false` evaluate to `true` — writing the flag out explicitly disabled certificate checking. An unparseable value is now an error, and enabling self-signed certificates with no CA file prints a warning.
+- **The mTLS example no longer ships insecure flags.** It set `verifyPeerName: false, allowSelfSigned: true` alongside a CA file, which made the CA irrelevant: it authenticated the client to the broker while accepting any server certificate. `examples/certs/generate.sh` now writes a `subjectAltName` (localhost, mosquitto, 127.0.0.1) so full verification works, sets `extendedKeyUsage` on both leaf certificates, and `chmod 600`s the private keys.
+- **TLS 1.0 and 1.1 are no longer negotiable.** Both transports hard-coded `STREAM_CRYPTO_METHOD_TLS_CLIENT`, which enables 1.0/1.1 — RFC 8996 says MUST NOT and PCI-DSS prohibits them. The default is now TLS 1.2 + 1.3, overridable via `TlsOptions::withCryptoMethod()` for a broker that genuinely cannot do 1.2.
+- **A failed TLS handshake reported only "TLS negotiation failed"** and left a half-open socket, which kept `isOpen()` true and suppressed auto-reconnect. Both transports now drain `openssl_error_string()` into the message — so "certificate verify failed" is distinguishable from "wrong version number" (i.e. connected to the plaintext port) — and close the socket before throwing.
+- `docs/flow-control.md`, `docs/topic-aliases.md` and `docs/shared-subscriptions.md` referenced private properties (`$client->flowControl`, `$client->topicAliasManager`), a method that does not exist (`FlowControl::getSendTime()`), and `$result->connack` where the property is `$connAck` — the last of which failed *silently*, making the broker-capability guard always report "supported". Rewritten against the real public API.
+
+### Changed — CI and packaging
+
+- CI now starts the repo's Mosquitto (`docker compose up -d --wait`) and **fails if the Integration suite skips**. Previously there was no broker in CI, so all ten real-broker tests self-skipped on every run and the build reported green having exercised nothing that touches a socket.
+- Coverage gates are actually enforced: `--min=85` on type coverage (the documented floor could never fail without it) and a line-coverage floor to be ratcheted to the first measured value.
+- Every GitHub Action is pinned to a commit SHA with the tag in a trailing comment.
+- New `examples` job lints every example, benchmark and the config template, and asserts the config loads on a fresh clone.
+- `.gitattributes` gained the full `export-ignore` set: the dist tarball drops from 169 files to 86 (`src/` plus `composer.json`, `README.md`, `CHANGELOG.md`, `LICENSE.md`, `SECURITY.md`).
+
 ### Fixed
 - **Inbound QoS 1 messages were silently dropped after the de-duplication cache filled.** The cache is keyed by Packet Identifier, and `array_shift()` renumbers integer keys from 0 — so past `qos1DeduplicationSize` entries every identifier in that range was treated as already-seen, PUBACKed, and discarded. Eviction is now by key. De-duplication also only suppresses re-deliveries flagged `DUP` (MQTT-3.3.1-3); brokers reuse identifiers as soon as they are acknowledged, so matching on the identifier alone discarded unrelated messages.
 - **A second `subscribe()`/`unsubscribe()` could kill the process.** `unset()` on a typed property leaves it uninitialized rather than restoring its default, so if any packet interleaved before the SUBACK the next read raised `Error: Typed property must not be accessed before initialization` — outside the `MqttException` hierarchy and uncatchable by documented handlers.

@@ -42,7 +42,7 @@ final class FlowControl
      *                         Default 65535 per MQTT 5.0 spec.
      */
     public function __construct(
-        private(set) int $maxInFlight = 65535 {
+        public private(set) int $maxInFlight = 65535 {
             set => max(1, min($value, 65535));
         },
     ) {

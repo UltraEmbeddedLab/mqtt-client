@@ -1,0 +1,57 @@
+# Dependencies
+/vendor/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Cache and build artifacts
+/.phpunit.result.cache
+/.phpunit.cache/
+/.phpstan.cache/
+/rector.php.cache
+/.pint.cache
+/.php-cs-fixer.cache
+
+# IDE and editor files
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local configuration
+/examples/config.php
+/.junie/
+/.claude/
+
+# Claude Code temp files
+tmpclaude-*
+
+# Personal files
+RELEASE_CHECKLIST.md
+/.dev/
+
+# Build artifacts
+/build/
+/coverage/
+/.coverage/
+/clover.xml
+/coverage.xml
+
+# composer.lock IS committed on purpose.
+# Composer ignores a dependency's lock file, so this costs consumers nothing — but without
+# it CI resolves the newest matching dev tools on every run, and a patch release of Pint,
+# PHPStan or Rector turns main red with no change to our code. Upgrades now arrive as
+# Dependabot PRs where the new violations show up in review instead.
+
+# Stray Windows redirect artefact
+/nul
+
+# Local AI assistant instructions — intentionally not published
+CLAUDE.md

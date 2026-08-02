@@ -177,7 +177,6 @@ test('encodePublish throws LogicException for QoS greater than 0 without packetI
         topic: 'test/topic',
         payload: 'hello',
         qos: QoS::AtLeastOnce,
-        packetId: null,
     );
     $encoder->encodePublish($pkt);
 })->throws(LogicException::class);

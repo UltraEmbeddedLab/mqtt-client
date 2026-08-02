@@ -161,3 +161,34 @@ test('fluent chaining preserves immutability', function (): void {
         ->and($chained->caFile)->toBe('/ca.pem')
         ->and($chained->clientCertificateFile)->toBe('/cert.pem');
 });
+
+test('defaults to TLS 1.2 and 1.3, excluding the versions RFC 8996 deprecates', function (): void {
+    $ctx    = new TlsOptions()->toStreamContext();
+    $method = $ctx['ssl']['crypto_method'];
+
+    // Bit 0 of every STREAM_CRYPTO_METHOD_*_CLIENT constant is the "client" flag shared
+    // by all of them; the version lives in the remaining bits. Mask it off before
+    // asserting that a version is absent, or every check trivially matches.
+    $clientFlag   = 1;
+    $tls10Version = STREAM_CRYPTO_METHOD_TLSv1_0_CLIENT & ~$clientFlag;
+    $tls11Version = STREAM_CRYPTO_METHOD_TLSv1_1_CLIENT & ~$clientFlag;
+
+    expect($method)->toBe(STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT | STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT)
+        ->and($method & $tls10Version)->toBe(0)
+        ->and($method & $tls11Version)->toBe(0);
+});
+
+test('the default crypto method is narrower than PHP\'s TLS_CLIENT alias', function (): void {
+    // STREAM_CRYPTO_METHOD_TLS_CLIENT also enables TLS 1.0 and 1.1. Pin the difference so
+    // a future "simplification" back to the alias fails here instead of in production.
+    expect(TlsOptions::DEFAULT_CRYPTO_METHOD)->not->toBe(STREAM_CRYPTO_METHOD_TLS_CLIENT)
+        ->and(TlsOptions::DEFAULT_CRYPTO_METHOD & ~STREAM_CRYPTO_METHOD_TLS_CLIENT)->toBe(0);
+});
+
+test('withCryptoMethod overrides the negotiated TLS versions', function (): void {
+    $legacy = new TlsOptions()->withCryptoMethod(STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT);
+
+    expect($legacy->cryptoMethod)->toBe(STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT)
+        ->and($legacy->toStreamContext()['ssl']['crypto_method'])->toBe(STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT)
+        ->and(new TlsOptions()->cryptoMethod)->toBe(TlsOptions::DEFAULT_CRYPTO_METHOD);
+});

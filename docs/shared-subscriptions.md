@@ -71,12 +71,15 @@ The specific strategy depends on the broker implementation.
 ```php
 $result = $client->connect();
 
-// Check CONNACK properties
-$supported = $result->connack->properties['shared_subscription_available'] ?? 1;
-if (!$supported) {
+// The property is optional: absent means "supported" per MQTT 5 §3.2.2.3.13.
+if ($result->connAck?->isSharedSubscriptionAvailable() === false) {
     echo "Broker does not support shared subscriptions";
 }
 ```
+
+> The property name is `connAck`, and it is `null` on MQTT 3.1.1 connections — a
+> `$result->connack->...` chain (lower-case `a`, no null check) fatals or silently
+> reports "supported" for every broker.
 
 ## Use Cases
 

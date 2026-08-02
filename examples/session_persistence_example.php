@@ -34,7 +34,10 @@ require __DIR__.'/../vendor/autoload.php';
  */
 
 // Load shared broker config
-$config = require __DIR__.'/config.php';
+// Use examples/config.php when present (gitignored, for your own broker),
+// otherwise fall back to the committed defaults so a fresh clone just runs.
+$configFile = is_file(__DIR__.'/config.php') ? __DIR__.'/config.php' : __DIR__.'/config.php.dist';
+$config     = require $configFile;
 
 // Use a fixed client ID for session persistence (required!)
 // In production, use a stable identifier for each device/client

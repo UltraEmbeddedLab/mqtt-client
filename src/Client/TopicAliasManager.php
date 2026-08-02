@@ -51,7 +51,7 @@ final class TopicAliasManager
      *                        Use 0 to disable topic aliases.
      */
     public function __construct(
-        private(set) int $maxAliases = 0 {
+        public private(set) int $maxAliases = 0 {
             set => max(0, $value);
         },
     ) {

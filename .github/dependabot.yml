@@ -1,0 +1,33 @@
+version: 2
+
+updates:
+  # Dev-tool upgrades arrive as PRs where CI shows the new violations, instead of
+  # silently turning main red on the next push. Runtime dependencies are PSR
+  # interfaces and change rarely.
+  - package-ecosystem: composer
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    groups:
+      dev-tooling:
+        patterns:
+          - 'laravel/pint'
+          - 'phpstan/*'
+          - 'rector/*'
+          - 'pestphp/*'
+          - 'symfony/var-dumper'
+          - 'vlucas/phpdotenv'
+
+  # Workflow actions are pinned to commit SHAs for supply-chain safety, which means a
+  # pinned SHA never picks up upstream security fixes on its own. Dependabot rewrites
+  # the SHA and the trailing version comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - ci

@@ -20,3 +20,22 @@
 *.png binary
 *.jpg binary
 *.gif binary
+
+# Keep the dist tarball to the runtime surface: everything below is development-only
+# and would otherwise ship into every consumer's vendor/ directory.
+/.github            export-ignore
+/.dev               export-ignore
+/.idea              export-ignore
+/tests              export-ignore
+/docs               export-ignore
+/examples           export-ignore
+/benchmarks         export-ignore
+/docker             export-ignore
+/.env.example       export-ignore
+/docker-compose.yml export-ignore
+/phpunit.xml        export-ignore
+/phpstan.neon.dist  export-ignore
+/pint.json          export-ignore
+/rector.php         export-ignore
+/CONTRIBUTING.md    export-ignore
+/CLAUDE.md          export-ignore

@@ -57,23 +57,30 @@ $client->publish('sensors/device1/temperature', '23.0');
 
 ### TopicAliasManager
 
+Outbound aliasing is automatic: after CONNACK the client builds its own
+`TopicAliasManager` from the broker's advertised `topic_alias_maximum` and applies it to
+every PUBLISH. That instance is internal and not reachable from `Client`. The class is
+public so you can drive it yourself:
+
 ```php
-// Get the manager from the client (after connect)
-$manager = $client->topicAliasManager;
+use ScienceStories\Mqtt\Client\TopicAliasManager;
+
+$manager = new TopicAliasManager(maxAliases: 10);
+
+// Allocate (or reuse) an alias for a topic
+['alias' => $alias, 'isNew' => $isNew] = $manager->getOrCreateAlias('sensors/temp');
 
 // Check current status
-$count = $manager->getAliasCount();      // Number of aliases used
-$max = $manager->maxAliases;             // Maximum aliases allowed
-$available = $manager->hasAvailableSlots(); // Can more aliases be created?
+$count     = $manager->getAliasCount();       // Number of aliases used
+$available = $manager->hasAvailableSlots();   // Can more aliases be created?
 
-// Get alias for a topic
-$alias = $manager->getAlias('sensors/temp'); // Returns int|null
+// Look up existing mappings
+$alias    = $manager->getAlias('sensors/temp');  // int|null
+$hasAlias = $manager->hasAlias('sensors/temp');  // bool
+$topic    = $manager->resolveAlias(1);           // string|null
 
-// Check if topic has an alias
-$hasAlias = $manager->hasAlias('sensors/temp'); // Returns bool
-
-// Resolve alias to topic (for debugging)
-$topic = $manager->resolveAlias(1); // Returns string|null
+// Aliases are connection-scoped
+$manager->reset();
 ```
 
 ## Limitations
@@ -82,6 +89,9 @@ $topic = $manager->resolveAlias(1); // Returns string|null
 2. **Broker Support**: Broker must advertise `topic_alias_maximum > 0`
 3. **Connection-Scoped**: Aliases reset on disconnect/reconnect
 4. **One-Way**: Each direction (client→broker, broker→client) has separate aliases
+5. **Outbound only, for now**: the client aliases the topics it *publishes*. Aliases the
+   broker uses on inbound PUBLISH packets are not yet resolved, so avoid setting
+   `withTopicAliasMaximum()` above 0 until that lands — see the roadmap.
 
 ## Best Practices
 

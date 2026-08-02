@@ -19,12 +19,12 @@
   },
   "require": {
     "php": "^8.4",
-    "ext-sockets": "*",
+    "ext-json": "*",
     "psr/log": "^3.0.2",
     "psr/event-dispatcher": "^1.0"
   },
   "suggest": {
-    "ext-openssl": "Required for TLS/SSL connections"
+    "ext-openssl": "Required for TLS/SSL connections (mqtts://, wss://). Plain TCP works without it."
   },
   "require-dev": {
     "pestphp/pest": "^v4.4.3",

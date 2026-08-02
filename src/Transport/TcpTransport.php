@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ScienceStories\Mqtt\Transport;
 
+use ScienceStories\Mqtt\Client\TlsOptions;
 use ScienceStories\Mqtt\Contract\TransportInterface;
 use ScienceStories\Mqtt\Exception\Timeout;
 use ScienceStories\Mqtt\Exception\TransportError;
@@ -182,6 +183,11 @@ final class TcpTransport implements TransportInterface
      */
     public function enableTls(?array $tlsOptions = null): void
     {
+        if (! extension_loaded('openssl')) {
+            // ext-openssl is only suggested, not required, so plain TCP works without it.
+            // Fail with something actionable rather than a cryptic crypto error.
+            throw new TransportError('Cannot enable TLS: ext-openssl is not loaded');
+        }
         if (! $this->isOpen()) {
             throw new TransportError('Cannot enable TLS: transport is not open');
         }
@@ -228,12 +234,51 @@ final class TcpTransport implements TransportInterface
             }
         }
 
-        // Initiate TLS handshake
-        $result = @stream_socket_enable_crypto($stream, true, STREAM_CRYPTO_METHOD_TLS_CLIENT);
+        // Initiate TLS handshake. STREAM_CRYPTO_METHOD_TLS_CLIENT would also permit
+        // TLS 1.0/1.1 (RFC 8996: MUST NOT), so default to 1.2+1.3 unless the caller
+        // widened it through TlsOptions::withCryptoMethod().
+        $method = TlsOptions::DEFAULT_CRYPTO_METHOD;
+        if (is_resource($this->context)) {
+            $ctxOpts    = stream_context_get_options($this->context);
+            $ssl        = is_array($ctxOpts['ssl'] ?? null) ? $ctxOpts['ssl'] : [];
+            $configured = $ssl['crypto_method'] ?? null;
+            if (is_int($configured)) {
+                $method = $configured;
+            }
+        }
+
+        $result = @stream_socket_enable_crypto($stream, true, $method);
         if ($result !== true) {
-            throw new TransportError('TLS negotiation failed');
+            $detail = $this->tlsErrorDetail();
+            // Leave no half-open socket behind: isOpen() would otherwise keep reporting
+            // true, which suppresses auto-reconnect and hides the failure.
+            $this->close();
+
+            throw new TransportError('TLS negotiation failed'.($detail === '' ? '' : ": $detail"));
         }
 
         $this->tlsEnabled = true;
+    }
+
+    /**
+     * Collect whatever OpenSSL and PHP recorded about the failed handshake.
+     *
+     * Without this the caller cannot tell "certificate verify failed" from "unknown ca"
+     * from "wrong version number" (i.e. connected to the plaintext port).
+     */
+    private function tlsErrorDetail(): string
+    {
+        $parts = [];
+        if (function_exists('openssl_error_string')) {
+            while (($err = openssl_error_string()) !== false) {
+                $parts[] = $err;
+            }
+        }
+        $last = error_get_last();
+        if ($last !== null && $last['message'] !== '') {
+            $parts[] = $last['message'];
+        }
+
+        return implode('; ', $parts);
     }
 }

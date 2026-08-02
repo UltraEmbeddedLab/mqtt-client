@@ -1,0 +1,86 @@
+<?php
+
+declare(strict_types=1);
+
+/*
+ * Shared broker configuration for the examples.
+ *
+ * This file is committed and works out of the box against the Mosquitto in
+ * docker-compose.yml (`docker compose up -d`). To point the examples at your own broker,
+ * either copy it to `examples/config.php` (gitignored) or set the environment variables
+ * below — see `.env.example`.
+ */
+
+use Dotenv\Dotenv;
+use ScienceStories\Mqtt\Client\TlsOptions;
+
+$root = dirname(__DIR__);
+if (is_file($root.'/.env') && class_exists(Dotenv::class)) {
+    Dotenv::createImmutable($root)->safeLoad();
+}
+
+$env = static function (string $key, ?string $default = null): ?string {
+    $v = $_ENV[$key] ?? $_SERVER[$key] ?? getenv($key);
+    if ($v === false || $v === null || $v === '') {
+        return $default;
+    }
+
+    return (string) $v;
+};
+
+/*
+ * Booleans must not go through a plain (bool) cast: (bool) 'false' is true, so
+ * MQTT_TLS_ALLOW_SELF_SIGNED=false would have disabled certificate checking.
+ */
+$envBool = static function (string $key, bool $default) use ($env): bool {
+    $raw = $env($key);
+    if ($raw === null) {
+        return $default;
+    }
+    $parsed = filter_var($raw, FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE);
+    if ($parsed === null) {
+        throw new RuntimeException("Environment variable $key must be a boolean, got \"$raw\"");
+    }
+
+    return $parsed;
+};
+
+$host    = $env('MQTT_HOST', 'localhost');
+$scheme  = $env('MQTT_SCHEME', 'tcp'); // 'tcp' or 'tls'
+$portEnv = $env('MQTT_PORT');
+$port    = is_numeric($portEnv) ? (int) $portEnv : ($scheme === 'tls' ? 8883 : 1883);
+
+// Build TlsOptions from the environment when scheme=tls.
+$tls = null;
+if ($scheme === 'tls') {
+    $allowSelfSigned = $envBool('MQTT_TLS_ALLOW_SELF_SIGNED', false);
+    $caFile          = $env('MQTT_TLS_CA_FILE');
+
+    if ($allowSelfSigned && $caFile === null) {
+        fwrite(STDERR, "WARNING: MQTT_TLS_ALLOW_SELF_SIGNED is on with no CA file — the server is not authenticated.\n");
+    }
+
+    $tls = new TlsOptions(
+        verifyPeer: $envBool('MQTT_TLS_VERIFY_PEER', true),
+        verifyPeerName: $envBool('MQTT_TLS_VERIFY_PEER_NAME', true),
+        allowSelfSigned: $allowSelfSigned,
+        caFile: $caFile,
+        clientCertificateFile: $env('MQTT_TLS_CLIENT_CERT'),
+        clientCertificateKeyFile: $env('MQTT_TLS_CLIENT_KEY'),
+        clientCertificateKeyPassphrase: $env('MQTT_TLS_CLIENT_KEY_PASSPHRASE'),
+        alpn: $env('MQTT_TLS_ALPN'),
+    );
+}
+
+return [
+    'host'   => $host,
+    'port'   => $port,
+    'scheme' => $scheme,
+
+    // Authentication (optional)
+    'username' => $env('MQTT_USERNAME'),
+    'password' => $env('MQTT_PASSWORD'),
+
+    // TlsOptions object or null
+    'tls' => $tls,
+];

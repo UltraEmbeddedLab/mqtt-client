@@ -42,20 +42,26 @@ foreach (['ca.pem' => $caFile, 'client.pem' => $certFile, 'client.key' => $keyFi
 echo "=== mTLS Example ===\n\n";
 
 // --- Build TlsOptions with client certificate ---
+//
+// Full verification stays ON. The test CA in $caFile is what makes that work: it signs
+// the server certificate, and generate.sh puts localhost/127.0.0.1 in the SAN so the
+// hostname check passes. Turning off verifyPeerName or turning on allowSelfSigned here
+// would authenticate *us* to the broker while accepting any certificate in return —
+// which is the opposite of what mTLS is for. Do not copy those flags into production.
 $tls = new TlsOptions(
     verifyPeer: true,
-    verifyPeerName: false,
-    allowSelfSigned: true,
-    caFile: $caFile,       // self-signed CA for testing
+    verifyPeerName: true,
+    allowSelfSigned: false,
+    caFile: $caFile,
     clientCertificateFile: $certFile,
-    clientCertificateKeyFile: $keyFile,       // CN=localhost, connecting to 127.0.0.1
+    clientCertificateKeyFile: $keyFile,
 );
 
 echo "TLS config:\n";
 echo "  CA file:     $caFile\n";
 echo "  Client cert: $certFile\n";
 echo "  Client key:  $keyFile\n";
-echo "  Self-signed: allowed (test CA)\n\n";
+echo "  Verification: peer + hostname, anchored on the test CA\n\n";
 
 // --- Show what gets passed to PHP stream context ---
 $ctx = $tls->toStreamContext();

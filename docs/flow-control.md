@@ -56,26 +56,31 @@ Flow control tracks:
 
 ### FlowControl
 
+The client creates and drives its own `FlowControl` from the broker's `receive_maximum`
+in CONNACK; that instance is internal and not reachable from `Client`. The class is
+public so you can use it directly when you are managing in-flight state yourself:
+
 ```php
-// Get the flow control manager from the client (after connect)
-$flow = $client->flowControl;
+use ScienceStories\Mqtt\Client\FlowControl;
+
+$flow = new FlowControl(maxInFlight: 10);
 
 // Check current status
-$inFlight = $flow->currentInFlight;     // Current in-flight messages
-$max = $flow->maxInFlight;              // Maximum allowed
-$canSend = $flow->canSend();            // Is a slot available?
+$inFlight = $flow->currentInFlight;       // Current in-flight messages
+$max      = $flow->maxInFlight;           // Maximum allowed
+$canSend  = $flow->canSend();             // Is a slot available?
 
-// Get pending packet IDs
-$pending = $flow->getPendingPacketIds(); // Returns list<int>
+// Track a send and its acknowledgement
+$flow->trackSend($packetId);
+$flow->trackAck($packetId);
 
-// Check if specific packet is pending
-$isPending = $flow->isPending($packetId); // Returns bool
+// Inspect pending state
+$pending   = $flow->getPendingPacketIds(); // list<int>
+$isPending = $flow->isPending($packetId);  // bool
+$timedOut  = $flow->getTimedOutPackets(30.0); // Packets pending > 30 seconds
 
-// Get send timestamp for a packet
-$sendTime = $flow->getSendTime($packetId); // Returns float|null
-
-// Find timed-out packets
-$timedOut = $flow->getTimedOutPackets(30.0); // Packets pending > 30 seconds
+// Clear on reconnect
+$flow->reset();
 ```
 
 ## Default Values

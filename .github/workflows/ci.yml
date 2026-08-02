@@ -9,34 +9,49 @@ on:
 permissions:
   contents: read
 
+# Every `uses:` is pinned to a commit SHA with the tag in a trailing comment. A mutable
+# tag lets a compromised action repository run arbitrary code with CODECOV_TOKEN in scope.
+
 jobs:
   tests:
     runs-on: ubuntu-latest
 
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
-        php: [8.4]
+        php: ['8.4']
 
     name: PHP ${{ matrix.php }} Tests
 
+    env:
+      MQTT_HOST: 127.0.0.1
+      MQTT_PORT: 1883
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: sockets, openssl
+          extensions: openssl
           coverage: xdebug
+
+      # Started from the repo's compose file rather than a `services:` block: the stock
+      # eclipse-mosquitto:2 config refuses anonymous remote connections, while
+      # docker/mosquitto/mosquitto.conf is what the examples and tests expect. Without a
+      # live broker the Integration suite marks itself skipped and the build stays green
+      # having exercised nothing that touches a socket.
+      - name: Start Mosquitto
+        run: docker compose up -d --wait
 
       - name: Get composer cache directory
         id: composer-cache
         run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
 
       - name: Cache dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ steps.composer-cache.outputs.dir }}
           key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.json') }}
@@ -45,17 +60,59 @@ jobs:
       - name: Install dependencies
         run: composer install --prefer-dist --no-interaction --no-progress
 
+      - name: Integration tests must run, not skip
+        run: |
+          output=$(vendor/bin/pest --testsuite=Integration 2>&1)
+          echo "$output"
+          if echo "$output" | grep -qi "broker not available"; then
+            echo "::error::Integration tests skipped despite a running broker"
+            exit 1
+          fi
+
+      # --min is what makes coverage a gate; without it the run reports and passes.
+      # TODO: raise to the value the first green run reports, minus a small margin.
       - name: Run tests with coverage
-        run: vendor/bin/pest --coverage --coverage-clover=coverage.xml
+        run: vendor/bin/pest --coverage --coverage-clover=coverage.xml --min=35
 
       - name: Upload coverage to Codecov
         if: matrix.php == '8.4'
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         with:
           files: coverage.xml
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Stop Mosquitto
+        if: always()
+        run: docker compose down -v
+
+  install-on-stock-php:
+    runs-on: ubuntu-latest
+    name: Install on stock php:8.4-cli
+    container: php:8.4-cli
+    # Guards against a phantom extension requirement. `ext-sockets` sat in `require`
+    # while nothing in src/ ever called a socket_* function, so `composer require` failed
+    # on the official images while every other job stayed green.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install composer
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends git unzip
+          curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+      - name: Install runtime dependencies only
+        run: composer install --no-dev --prefer-dist --no-interaction --no-progress
+
+      - name: Smoke test the autoloader with no optional extensions
+        run: |
+          php -r 'require "vendor/autoload.php";
+            $o = new ScienceStories\Mqtt\Client\Options(host: "localhost");
+            $t = new ScienceStories\Mqtt\Testing\InMemoryTransport();
+            new ScienceStories\Mqtt\Client\Client($o, $t);
+            echo "ok\n";'
 
   code-style:
     runs-on: ubuntu-latest
@@ -63,24 +120,13 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
         with:
-          php-version: 8.4
-          extensions: sockets, openssl
-
-      - name: Get composer cache directory
-        id: composer-cache
-        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.composer-cache.outputs.dir }}
-          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.json') }}
-          restore-keys: ${{ runner.os }}-composer-
+          php-version: '8.4'
+          extensions: openssl
 
       - name: Install dependencies
         run: composer install --prefer-dist --no-interaction --no-progress
@@ -94,24 +140,13 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
         with:
-          php-version: 8.4
-          extensions: sockets, openssl
-
-      - name: Get composer cache directory
-        id: composer-cache
-        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.composer-cache.outputs.dir }}
-          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.json') }}
-          restore-keys: ${{ runner.os }}-composer-
+          php-version: '8.4'
+          extensions: openssl
 
       - name: Install dependencies
         run: composer install --prefer-dist --no-interaction --no-progress
@@ -125,31 +160,21 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
         with:
-          php-version: 8.4
-          extensions: sockets, openssl
+          php-version: '8.4'
+          extensions: openssl
           coverage: xdebug
-
-      - name: Get composer cache directory
-        id: composer-cache
-        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.composer-cache.outputs.dir }}
-          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.json') }}
-          restore-keys: ${{ runner.os }}-composer-
 
       - name: Install dependencies
         run: composer install --prefer-dist --no-interaction --no-progress
 
+      # Without --min the plugin defaults to 0.0, so the documented 85% floor never failed.
       - name: Check type coverage
-        run: php -d memory_limit=512M vendor/bin/pest --type-coverage
+        run: php -d memory_limit=512M vendor/bin/pest --type-coverage --min=85
 
   rector-compliance:
     runs-on: ubuntu-latest
@@ -157,24 +182,13 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
         with:
-          php-version: 8.4
-          extensions: sockets, openssl
-
-      - name: Get composer cache directory
-        id: composer-cache
-        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
-        with:
-          path: ${{ steps.composer-cache.outputs.dir }}
-          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.json') }}
-          restore-keys: ${{ runner.os }}-composer-
+          php-version: '8.4'
+          extensions: openssl
 
       - name: Install dependencies
         run: composer install --prefer-dist --no-interaction --no-progress
@@ -182,18 +196,49 @@ jobs:
       - name: Check Rector compliance
         run: composer rector:check
 
+  examples:
+    runs-on: ubuntu-latest
+    name: Examples
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
+        with:
+          php-version: '8.4'
+          extensions: openssl
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Lint every example and benchmark
+        run: |
+          status=0
+          for f in examples/*.php examples/config.php.dist benchmarks/*.php; do
+            [ -f "$f" ] || continue
+            php -l "$f" > /dev/null || status=1
+          done
+          exit $status
+
+      # The examples used to require a gitignored config.php with no committed template,
+      # so 17 of 20 fatally failed on a fresh clone.
+      - name: Examples must load their config on a fresh clone
+        run: php -r 'require "vendor/autoload.php"; $c = require "examples/config.php.dist"; exit(isset($c["host"]) ? 0 : 1);'
+
   security-audit:
     runs-on: ubuntu-latest
     name: Security Audit
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
         with:
-          php-version: 8.4
+          php-version: '8.4'
 
       - name: Validate composer.json
         run: composer validate --strict

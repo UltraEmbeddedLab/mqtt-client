@@ -28,8 +28,10 @@ Modern, production-grade MQTT 3.1.1 & 5.0 client for PHP 8.4+
 ## Requirements
 
 - PHP 8.4 or higher
-- `ext-sockets` extension
-- `ext-openssl` extension (for TLS)
+- `ext-json` (bundled with PHP and not removable since 8.0)
+- `ext-openssl` — only for TLS (`mqtts://`, `wss://`). Plain TCP works without it.
+
+No other extensions are needed: all I/O goes through PHP's stream functions.
 
 ## Installation
 

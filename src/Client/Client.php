@@ -94,7 +94,7 @@ final class Client implements ClientInterface
 
     private ?UnsubAck $lastUnsubAck = null;
 
-    private float $lastActivity = 0.0;
+    private float $lastActivity;
 
     private bool $pingOutstanding = false;
 
@@ -487,8 +487,8 @@ final class Client implements ClientInterface
         $message = 'CONNECT refused: '.$connack->getReasonDescription(MqttVersion::V3_1_1);
 
         return match ($code) {
-            3 => new ServerError($message, $code),
-            4, 5 => new AuthenticationError($message, $code),
+            3       => new ServerError($message, $code),
+            4, 5    => new AuthenticationError($message, $code),
             default => new ProtocolError($message, $code),
         };
     }

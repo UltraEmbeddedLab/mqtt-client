@@ -1,0 +1,4 @@
+# Generated test certificates — regenerate with: bash examples/certs/generate.sh
+*.pem
+*.key
+*.srl

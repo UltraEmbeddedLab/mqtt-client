@@ -12,6 +12,16 @@ namespace ScienceStories\Mqtt\Client;
  */
 final class TlsOptions
 {
+    /**
+     * TLS 1.2 and 1.3 only.
+     *
+     * PHP's `STREAM_CRYPTO_METHOD_TLS_CLIENT` also enables TLS 1.0 and 1.1, which RFC 8996
+     * deprecates as MUST NOT and PCI-DSS prohibits. Callers that must talk to a legacy
+     * broker can widen this with `withCryptoMethod()`.
+     */
+    public const int DEFAULT_CRYPTO_METHOD = STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT
+        | STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT;
+
     public function __construct(
         public bool $verifyPeer = true,
         public bool $verifyPeerName = true,
@@ -24,7 +34,23 @@ final class TlsOptions
         public ?string $peerName = null,
         public ?string $alpn = null,
         public bool $sniEnabled = true,
+        public int $cryptoMethod = self::DEFAULT_CRYPTO_METHOD,
     ) {
+    }
+
+    /**
+     * Override the negotiated TLS versions.
+     *
+     * Pass a bitmask of `STREAM_CRYPTO_METHOD_*_CLIENT` constants. Only widen this for a
+     * broker that genuinely cannot do TLS 1.2 — every version below it is deprecated by
+     * RFC 8996.
+     */
+    public function withCryptoMethod(int $method): self
+    {
+        $c               = clone $this;
+        $c->cryptoMethod = $method;
+
+        return $c;
     }
 
     public function withVerifyPeer(bool $verify): self
@@ -113,6 +139,7 @@ final class TlsOptions
             'verify_peer_name'  => $this->verifyPeerName,
             'allow_self_signed' => $this->allowSelfSigned,
             'SNI_enabled'       => $this->sniEnabled,
+            'crypto_method'     => $this->cryptoMethod,
         ];
 
         if ($this->caFile !== null) {
