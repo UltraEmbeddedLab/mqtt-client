@@ -1,123 +1,128 @@
 # Contributing
 
-Thank you for considering contributing to PHP IoT MQTT Client! This document provides guidelines and instructions for contributing.
+Thanks for considering a contribution. This document is short on ceremony and long on the
+things that actually save you a round-trip.
 
 ## Code of Conduct
 
-Please be respectful and constructive in all interactions. We welcome contributors of all experience levels.
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). Report unacceptable
+behaviour to gewaldb@gmail.com.
 
-## How to Contribute
+## What we're looking for
 
-### Reporting Bugs
+These are the real gaps, roughly in order of value. Any of them is welcome as a PR or as a
+design discussion first — see [ROADMAP.md](ROADMAP.md) for the full picture.
 
-Before creating a bug report, please check existing issues to avoid duplicates. When creating a bug report, include:
+- **Async adapter** — a ReactPHP or Amp driver. Blocked on splitting the blocking pump out
+  of `Client`, which is the largest open piece of work.
+- **Laravel or Symfony bridge** — service provider / bundle, config-to-`Options` mapping,
+  a long-running listener command.
+- **Inbound MQTT 5 topic-alias resolution** — the client negotiates aliases outbound but
+  does not resolve them on received PUBLISH packets.
+- **Acting on acknowledgement reason codes** — a PUBACK or SUBACK carrying a failure code
+  is currently logged, not raised.
+- **WebSocket transport** — continuation frames, and `wss://` (TLS must be enabled before
+  the HTTP upgrade, which the current ordering makes impossible).
+- **Typed MQTT 5 property objects** to replace `array<string, mixed>` on the public API.
 
-- A clear, descriptive title
-- Steps to reproduce the issue
-- Expected behavior
-- Actual behavior
-- PHP version and environment details
-- MQTT broker information (if relevant)
+Small, well-tested fixes are just as welcome as large features.
 
-### Suggesting Features
+## Development setup
 
-Feature suggestions are welcome! Please provide:
-
-- A clear description of the feature
-- Use cases and benefits
-- Any implementation ideas you have
-
-### Pull Requests
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Make your changes
-4. Run the test suite and ensure all checks pass
-5. Commit your changes (`git commit -m 'Add amazing feature'`)
-6. Push to your branch (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
-
-## Development Setup
-
-### Requirements
-
-- PHP 8.4+
-- Composer
-
-### Installation
+Requirements: PHP 8.4+, Composer, and Docker for the integration suite.
 
 ```bash
 git clone https://github.com/UltraEmbeddedLab/php-iot.git
 cd php-iot
 composer install
+docker compose up -d --wait   # Mosquitto on 1883, the integration tests need it
 ```
 
-### Running Tests
+### One command before you push
 
 ```bash
-# Run tests
-composer test
-
-# Run tests with coverage
-composer test:coverage
-
-# Check type coverage
-composer type-coverage
+composer ci
 ```
 
-### Code Style
+That runs, in order: `composer validate --strict`, `composer audit`, the workflow YAML
+linter, Pint, PHPStan, Rector in dry-run mode, and the full test suite. It is exactly what
+CI runs, so if it is green locally, CI will be green.
 
-We use Laravel Pint for code formatting:
+Individual pieces:
 
 ```bash
-# Check code style
-composer pint -- --test
-
-# Fix code style
-composer pint
+composer test              # both suites
+composer test:unit         # unit only — no broker needed
+composer test:integration  # needs the Docker broker
+composer test:coverage     # line coverage
+composer type-coverage     # type coverage (CI enforces 85%)
+composer stan              # PHPStan, level max
+composer pint              # fix code style; `composer pint -- --test` to check
+composer rector            # apply modernisation; `composer rector:check` to check
+composer lint:workflows    # parse .github/workflows/*.yml
 ```
 
-### Static Analysis
+### About the integration suite
 
-We use PHPStan at the maximum level:
+The integration tests skip themselves when no broker answers on `MQTT_HOST:MQTT_PORT`
+(default `127.0.0.1:1883`). **If you see "MQTT broker not available", start Docker — you
+are not running the tests that matter.** CI fails the build if they skip.
 
-```bash
-composer stan
-```
+For unit tests that need a scripted peer, use `ScienceStories\Mqtt\Testing\InMemoryTransport`
+rather than a live broker. It is a six-method `TransportInterface` with `feedConnAck()`,
+`feedPublish()`, `feedSubAck()` and friends for inbound scripting, plus `sentPackets()` and
+`countSent()` for assertions. Every regression test in `tests/Unit/Client/` uses it.
 
-### Code Modernization
+## Pull requests
 
-We use Rector for code modernization:
+1. Fork and branch (`git checkout -b feature/amazing-feature`).
+2. Make your change, with tests.
+3. `composer ci` — green.
+4. Commit **with sign-off**: `git commit -s -m 'Add amazing feature'` (see below).
+5. Push and open a PR.
 
-```bash
-composer rector
-```
+### Licensing of contributions
 
-## Coding Standards
+This project uses the [Developer Certificate of Origin](DCO). Sign off every commit with
+`git commit -s`, which appends a `Signed-off-by: Your Name <you@example.com>` trailer.
 
-- Follow PSR-12 coding style
-- Use strict types (`declare(strict_types=1);`)
-- Write descriptive commit messages
-- Add tests for new features
-- Update documentation when needed
-- Keep backwards compatibility in mind
+By contributing, you agree that your contributions are licensed under the
+[MIT License](LICENSE.md) — the same licence that covers this project (inbound = outbound).
 
-## Testing
+There is no CLA and no copyright assignment.
 
-- All new features should include tests
-- Maintain or improve code coverage
-- Use Pest PHP for writing tests
-- Tests should be fast and isolated
+## Coding standards
+
+The tooling enforces most of this; the rest is convention worth knowing:
+
+- PSR-12 via Pint, plus `declare(strict_types=1)` in every file.
+- Pint imports global functions and constants, hence the long `use function` blocks —
+  do not remove them.
+- `Options` and the `*Options` family are immutable by convention: `with*()` clones then
+  assigns. New value objects should use PHP 8.4 `private(set)` (see `TopicAliasManager`).
+- PHPStan runs at level max with `treatPhpDocTypesAsCertain` and `checkMissingTypehints`.
+  Do not add `@phpstan-ignore` to silence an error — `reportUnmatchedIgnoredErrors` is on,
+  so a suppression that stops being needed will fail the build.
+- Anything touching the wire needs a byte-level test. Assert exact bytes, not
+  `str_contains` — the latter cannot detect field reordering or a wrong Remaining Length.
+
+## Backward compatibility
+
+Read [docs/backward-compatibility.md](docs/backward-compatibility.md) before changing
+anything public. It defines what is covered by semver, which behavioural changes count as
+breaking, and the deprecation process. A change that keeps a signature but starts throwing
+is still a break.
 
 ## Documentation
 
-- Update README.md for user-facing changes
-- Add PHPDoc blocks for public methods
-- Include examples for new features
-- Update CHANGELOG.md following Keep a Changelog format
+- Update `README.md` for user-facing changes.
+- Add an entry to `CHANGELOG.md` under `[Unreleased]`, in the right section.
+- PHPDoc on public methods; explain *why*, not *what*.
+- Add an example under `examples/` for a new feature — CI lints all of them.
 
 ## Questions?
 
-Feel free to open an issue for any questions about contributing.
+Use [Discussions](https://github.com/UltraEmbeddedLab/php-iot/discussions) for questions and
+usage help. The issue tracker is for bugs and feature requests.
 
-Thank you for your contributions!
+Thank you.

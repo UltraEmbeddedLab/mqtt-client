@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or usage help
+    url: https://github.com/UltraEmbeddedLab/php-iot/discussions
+    about: Ask here — the issue tracker is for bugs and feature requests.
+  - name: Security vulnerability
+    url: https://github.com/UltraEmbeddedLab/php-iot/security/advisories/new
+    about: Report privately. Do not open a public issue.

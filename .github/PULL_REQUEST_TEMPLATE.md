@@ -23,15 +23,14 @@ Fixes #(issue number)
 
 ## Testing
 
-- [ ] Tests pass locally (`composer test`)
-- [ ] PHPStan passes (`composer stan`)
-- [ ] Code style is correct (`composer pint -- --test`)
+- [ ] `composer ci` is green locally (this runs everything CI runs)
+- [ ] Integration tests actually ran — not skipped (`docker compose up -d --wait` first)
 - [ ] Added tests for new functionality (if applicable)
 
 ## Checklist
 
-- [ ] My code follows the project's coding standards
+- [ ] My commits are signed off (`git commit -s`) — see [CONTRIBUTING.md](../CONTRIBUTING.md#licensing-of-contributions)
+- [ ] I have read [docs/backward-compatibility.md](../docs/backward-compatibility.md) if this touches public API
 - [ ] I have updated the documentation accordingly
 - [ ] I have added tests that prove my fix/feature works
-- [ ] All new and existing tests pass
-- [ ] I have updated CHANGELOG.md (if applicable)
+- [ ] I have updated CHANGELOG.md under `[Unreleased]` (if applicable)

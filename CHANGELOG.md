@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-08-02
+
+Two things happened at once: the package was renamed, and a set of defects were fixed in
+ways that change observable behaviour. See **[UPGRADE.md](UPGRADE.md)** for the migration —
+it is about fifteen minutes for a typical application, and if you already wrap `connect()`
+in a broad `catch (RuntimeException)` you may need to do nothing at all.
+
+What is and is not covered by semver from here on is written down in
+[docs/backward-compatibility.md](docs/backward-compatibility.md).
+
+### Changed — BREAKING
+
+- **The package is now `ultraembeddedlab/mqtt-client`** (was `ultraembeddedlab/php-iot`).
+  The PHP namespace is unchanged — still `ScienceStories\Mqtt\` — so no `use` statement in
+  your code moves. The old package name is declared in `replace`, so Composer will not
+  install both; they share a namespace. Renaming the namespace is deferred to 3.0 to keep
+  this upgrade mechanical.
+- **`Client::connect()` throws instead of returning a refused `ConnectResult`.** It never
+  inspected the CONNACK return code, so a wrong password looked like a live connection and
+  surfaced later as an unrelated read timeout. It now closes the transport and throws
+  `AuthenticationError`, `ServerError` or `ProtocolError` via `ReasonCode::toException()`,
+  with a separate mapping for MQTT 3.1.1 return codes 1–5. All extend `RuntimeException`.
+  `ConnectResult::$reasonCode` is consequently always `0` and is deprecated.
+- **Inbound packets are capped at 16 MiB** (`Options::$maximumPacketSize`), checked against
+  the declared Remaining Length before the body is read. There was previously no bound, so
+  five header bytes could force a 256 MiB allocation pre-authentication. On MQTT 5 the value
+  is advertised as property `0x27` so the limit is negotiated rather than unilateral.
+- **The inbound queue is bounded at 1000 messages** (`Options::$inboundQueueSize`). It backs
+  `awaitMessage()`/`messages()` and was unbounded; in the push-only pattern nothing drained
+  it. Pass `withInboundQueueSize(0)` for the old behaviour.
+- **TLS 1.0 and 1.1 are refused.** Both transports hard-coded
+  `STREAM_CRYPTO_METHOD_TLS_CLIENT`, which enables versions RFC 8996 marks MUST NOT and
+  PCI-DSS prohibits. Default is TLS 1.2 + 1.3, overridable via
+  `TlsOptions::withCryptoMethod()`.
+- **Out-of-range configuration throws** rather than being silently accepted.
+  `Options::withKeepAlive()` and the `Options` constructor reject a Keep Alive outside
+  0–65535 — previously `withKeepAlive(86400)` was truncated to 20864 by `pack('n', ...)`,
+  dropping the connection every few hours for no visible reason.
+- **MQTT 3.1.1 CONNECT with a password but no username throws `ProtocolError`**
+  (MQTT-3.1.2-22). Brokers closed the connection without a CONNACK, which was
+  undiagnosable client-side. MQTT 5 still permits it.
+- **A malformed PUBLISH raises `ProtocolError`, not `\ValueError`.** Both QoS bits set
+  previously escaped the `MqttException` hierarchy and killed long-running loops.
+
+### Deprecated
+
+- `ConnectResult::$reasonCode` — always `0` now that `connect()` throws on refusal.
+  Scheduled for removal in 3.0.
+
 ### Fixed — distribution and secure defaults
 
 - **`composer require` failed on the official `php:8.4-cli` and `php:8.4-fpm` images.** `ext-sockets` sat in `require` while nothing in `src/` ever called a `socket_*` function — all I/O goes through `stream_socket_client()`. Removed. `ext-json` (used by `FileSessionStore` and `ConsoleLogger`) is now declared; `ext-openssl` stays a suggestion, since plain TCP does not need it, but both transports now fail with `Cannot enable TLS: ext-openssl is not loaded` instead of a cryptic crypto error. A new CI job installs the package on a stock `php:8.4-cli` container so a phantom extension requirement cannot come back.
@@ -46,9 +95,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Bytes::encodeUint16()` — two-byte field encoder that rejects values it cannot represent instead of wrapping modulo 65536.
 - MQTT 5 CONNECT now encodes the Maximum Packet Size property (0x27).
 
-### Changed (BREAKING — target 2.0.0, or 1.4.0 only if the two new defaults are made opt-in)
+### Changed — BREAKING, in detail
 
-These are behavioural, not source-level, breaks: code that compiles today keeps compiling, but observable behaviour changes.
+The summary is under "Changed — BREAKING" above; these are the same changes with the
+reasoning. All are behavioural, not source-level: code that compiles against 1.3 still
+compiles against 2.0.
 
 - **`Client::connect()` throws instead of returning a refused `ConnectResult`.** `ConnectResult::$reasonCode` is consequently always `0`; code branching on it (including the shipped `examples/*.php`) is now dead. Catch `AuthenticationError`, `ServerError` or `ProtocolError` — all extend `MqttException extends RuntimeException`, so an existing `catch (RuntimeException)` still works. `attemptReconnect()` now counts a refused CONNECT against `reconnectMaxAttempts`, where it previously treated the refusal as a successful connect.
 - **Inbound packets larger than `maximumPacketSize` (new default 16 MiB) are rejected.** `loopOnce()` logs a warning, closes the transport and returns `false` — it does not throw, so the documented `bool` contract holds and auto-reconnect can recover. `connect()` still throws, having no loop contract to honour. Previously such packets were read in full.
@@ -146,7 +197,8 @@ These are behavioural, not source-level, breaks: code that compiles today keeps 
 - Easy facade for simple usage
 - Comprehensive examples and documentation
 
-[Unreleased]: https://github.com/UltraEmbeddedLab/php-iot/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/UltraEmbeddedLab/php-iot/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/UltraEmbeddedLab/php-iot/compare/v1.3.0...v2.0.0
 [1.3.0]: https://github.com/UltraEmbeddedLab/php-iot/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/UltraEmbeddedLab/php-iot/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/UltraEmbeddedLab/php-iot/compare/v1.0.0...v1.1.0

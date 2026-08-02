@@ -1,0 +1,11 @@
+# Every PR gets a review request. The specific entries below matter most: a change to CI
+# or to the protocol encoders can be correct in isolation and still wrong on the wire.
+
+*                       @UltraEmbeddedLab
+
+/.github/workflows/     @UltraEmbeddedLab
+/src/Protocol/          @UltraEmbeddedLab
+/src/Transport/         @UltraEmbeddedLab
+/SECURITY.md            @UltraEmbeddedLab
+/LICENSE.md             @UltraEmbeddedLab
+/composer.json          @UltraEmbeddedLab

@@ -1,5 +1,5 @@
 {
-  "name": "ultraembeddedlab/php-iot",
+  "name": "ultraembeddedlab/mqtt-client",
   "description": "MQTT 3.1.1 and MQTT 5.0 client for PHP 8.4+ — QoS 0/1/2, TLS and mutual TLS, WebSocket transport, auto-reconnect, persistent sessions",
   "type": "library",
   "license": "MIT",
@@ -43,6 +43,9 @@
     "symfony/yaml": "^8.1.2",
     "vlucas/phpdotenv": "^5.6.4"
   },
+  "replace": {
+    "ultraembeddedlab/php-iot": "self.version"
+  },
   "autoload": {
     "psr-4": {
       "ScienceStories\\Mqtt\\": "src/"
@@ -70,7 +73,7 @@
     "security:audit": "composer audit",
     "validate:strict": "composer validate --strict",
     "ci": "@validate:strict && @security:audit && @lint:workflows && @pint --test && @stan && @rector:check && @test",
-    "bench": "php benchmarks/publish-throughput.php"
+    "bench": "php benchmarks/encode-throughput.php"
   },
   "config": {
     "sort-packages": true,

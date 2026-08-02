@@ -1,0 +1,102 @@
+name: Bug Report
+description: Report a bug in the MQTT client
+title: "[BUG] "
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The fields below are the ones that decide whether this can
+        be diagnosed in one pass or five. The protocol version and transport matter more
+        than they look: the codebase has separate encoder/decoder pairs for MQTT 3.1.1 and
+        5.0, and four transport code paths.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what actually happened.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mqtt-version
+    attributes:
+      label: MQTT protocol version
+      options:
+        - "3.1.1"
+        - "5.0"
+        - Both / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - "tcp:// (plaintext)"
+        - "tls:// or mqtts:// (TLS)"
+        - "TLS with client certificate (mTLS)"
+        - "ws:// (WebSocket)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: qos
+    attributes:
+      label: QoS level involved
+      options:
+        - "0"
+        - "1"
+        - "2"
+        - Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: broker
+    attributes:
+      label: Broker and version
+      placeholder: "Mosquitto 2.0.18 / EMQX 5.4 / AWS IoT Core / HiveMQ Cloud"
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Package version and PHP version
+      placeholder: "v2.0.0 on PHP 8.4.3"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: >
+        Ideally against the Mosquitto in docker-compose.yml, or as a failing test using
+        ScienceStories\Mqtt\Testing\InMemoryTransport. Redact credentials.
+      render: php
+    validations:
+      required: true
+
+  - type: textarea
+    id: trace
+    attributes:
+      label: Packet trace or debug log
+      description: >
+        Attach a PSR-3 debug log, or subscribe to the PacketSent / PacketReceived events
+        and paste the packet sequence around the failure. This is usually what makes a
+        protocol bug diagnosable without a round-trip.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I reproduced this on the latest release
+          required: true
+        - label: A persistent session (cleanSession=false) is in use
+        - label: Auto-reconnect is enabled

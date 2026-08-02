@@ -1,9 +1,10 @@
 # PHP IoT MQTT Client
 
 [![CI](https://github.com/UltraEmbeddedLab/php-iot/actions/workflows/ci.yml/badge.svg)](https://github.com/UltraEmbeddedLab/php-iot/actions/workflows/ci.yml)
-[![Latest Stable Version](https://poser.pugx.org/ultraembeddedlab/php-iot/v)](https://packagist.org/packages/ultraembeddedlab/php-iot)
-[![License](https://poser.pugx.org/ultraembeddedlab/php-iot/license)](https://packagist.org/packages/ultraembeddedlab/php-iot)
-[![PHP Version](https://img.shields.io/packagist/php-v/ultraembeddedlab/php-iot)](https://packagist.org/packages/ultraembeddedlab/php-iot)
+[![Latest Stable Version](https://poser.pugx.org/ultraembeddedlab/mqtt-client/v)](https://packagist.org/packages/ultraembeddedlab/mqtt-client)
+[![License](https://poser.pugx.org/ultraembeddedlab/mqtt-client/license)](https://packagist.org/packages/ultraembeddedlab/mqtt-client)
+[![PHP Version](https://img.shields.io/packagist/php-v/ultraembeddedlab/mqtt-client)](https://packagist.org/packages/ultraembeddedlab/mqtt-client)
+[![PHPStan](https://img.shields.io/badge/PHPStan-level%20max-brightgreen)](https://phpstan.org/)
 
 Modern, production-grade MQTT 3.1.1 & 5.0 client for PHP 8.4+
 
@@ -38,8 +39,11 @@ No other extensions are needed: all I/O goes through PHP's stream functions.
 Install via Composer:
 
 ```bash
-composer require ultraembeddedlab/php-iot
+composer require ultraembeddedlab/mqtt-client
 ```
+
+> Upgrading from `ultraembeddedlab/php-iot` 1.x? The package was renamed in 2.0 — the PHP
+> namespace is unchanged, so no `use` statement moves. See [UPGRADE.md](UPGRADE.md).
 
 ## Quick Start
 
@@ -390,13 +394,17 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed and what is planned.
 
 ## Documentation
 
-Detailed documentation is available in the `docs/` directory:
+- [Upgrading from 1.x](UPGRADE.md) — what changed in 2.0 and how to migrate
+- [Backward Compatibility Promise](docs/backward-compatibility.md) — what semver covers here
+- [Roadmap](ROADMAP.md) — what is planned, and where help is wanted
 
-- [Flow Control](docs/flow-control.md)
-- [Session Persistence](docs/session-persistence.md)
-- [Shared Subscriptions](docs/shared-subscriptions.md)
-- [Topic Aliases](docs/topic-aliases.md)
-- [Server Disconnect](docs/server-disconnect.md)
+Feature guides in `docs/`:
+
+- [Flow Control](docs/flow-control.md) — MQTT 5 receive-maximum and in-flight limits
+- [Session Persistence](docs/session-persistence.md) — surviving restarts with `cleanSession: false`
+- [Shared Subscriptions](docs/shared-subscriptions.md) — `$share/` load balancing across consumers
+- [Topic Aliases](docs/topic-aliases.md) — MQTT 5 bandwidth optimisation
+- [Server Disconnect](docs/server-disconnect.md) — reacting to a broker-initiated DISCONNECT
 
 ## Examples
 
@@ -434,4 +442,14 @@ PHP IoT MQTT Client is open-sourced software licensed under the [MIT license](LI
 
 ## Credits
 
-Developed by [Bogdan Gewald](mailto:gewaldb@gmail.com)
+Developed by [Bogdan Gewald](mailto:gewaldb@gmail.com).
+
+UltraEmbeddedLab is the publishing organisation for this package; copyright is held by
+Bogdan Gewald, as stated in [LICENSE.md](LICENSE.md). Contributions are accepted under the
+[Developer Certificate of Origin](DCO) — inbound licence equals outbound licence, MIT. There
+is no copyright assignment and no CLA.
+
+The PHP namespace is `ScienceStories\Mqtt\` for historical reasons: the package was
+originally published as `science-stories/php-iot`. It is unchanged for backwards
+compatibility and is scheduled to be renamed in 3.0 with `class_alias()` shims — see
+[ROADMAP.md](ROADMAP.md).
