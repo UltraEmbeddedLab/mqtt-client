@@ -16,7 +16,7 @@ test('constructor clamps to maximum 65535', function (): void {
 
 test('canSend initially true', function (): void {
     $flow = new FlowControl();
-    expect($flow->canSend())->toBe(true);
+    expect($flow->canSend())->toBeTrue();
 });
 
 test('trackSend increments in-flight count', function (): void {
@@ -31,18 +31,18 @@ test('canSend false when at max', function (): void {
     $flow = new FlowControl(2);
     $flow->trackSend(1);
     $flow->trackSend(2);
-    expect($flow->canSend())->toBe(false);
+    expect($flow->canSend())->toBeFalse();
 });
 
 test('trackAck decrements count and reopens slot', function (): void {
     $flow = new FlowControl(2);
     $flow->trackSend(1);
     $flow->trackSend(2);
-    expect($flow->canSend())->toBe(false);
+    expect($flow->canSend())->toBeFalse();
 
     $flow->trackAck(1);
-    expect($flow->currentInFlight)->toBe(1);
-    expect($flow->canSend())->toBe(true);
+    expect($flow->currentInFlight)->toBe(1)
+        ->and($flow->canSend())->toBeTrue();
 });
 
 test('trackAck for unknown packetId is no-op', function (): void {
@@ -69,8 +69,8 @@ test('getPendingPacketIds returns tracked ids', function (): void {
 test('isPending returns correct state', function (): void {
     $flow = new FlowControl();
     $flow->trackSend(5);
-    expect($flow->isPending(5))->toBe(true);
-    expect($flow->isPending(6))->toBe(false);
+    expect($flow->isPending(5))->toBeTrue()
+        ->and($flow->isPending(6))->toBeFalse();
 });
 
 test('getTimedOutPackets identifies stale packets', function (): void {
@@ -89,9 +89,9 @@ test('reset clears all state', function (): void {
     $flow->trackSend(2);
     $flow->reset();
 
-    expect($flow->currentInFlight)->toBe(0);
-    expect($flow->getPendingPacketIds())->toBe([]);
-    expect($flow->canSend())->toBe(true);
+    expect($flow->currentInFlight)->toBe(0)
+        ->and($flow->getPendingPacketIds())->toBe([])
+        ->and($flow->canSend())->toBeTrue();
 });
 
 test('setMaxInFlight updates limit', function (): void {

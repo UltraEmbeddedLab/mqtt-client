@@ -73,19 +73,19 @@ test('subscribe filter with # not alone in level throws', function (): void {
 })->throws(ProtocolError::class);
 
 test('isValidPublishTopic returns true for valid', function (): void {
-    expect(TopicValidator::isValidPublishTopic('sensors/temperature'))->toBe(true);
+    expect(TopicValidator::isValidPublishTopic('sensors/temperature'))->toBeTrue();
 });
 
 test('isValidPublishTopic returns false for invalid', function (): void {
-    expect(TopicValidator::isValidPublishTopic(''))->toBe(false);
-    expect(TopicValidator::isValidPublishTopic('sensors/+'))->toBe(false);
+    expect(TopicValidator::isValidPublishTopic(''))->toBeFalse()
+        ->and(TopicValidator::isValidPublishTopic('sensors/+'))->toBeFalse();
 });
 
 test('isValidSubscribeFilter returns true for valid', function (): void {
-    expect(TopicValidator::isValidSubscribeFilter('sensors/#'))->toBe(true);
+    expect(TopicValidator::isValidSubscribeFilter('sensors/#'))->toBeTrue();
 });
 
 test('isValidSubscribeFilter returns false for invalid', function (): void {
-    expect(TopicValidator::isValidSubscribeFilter(''))->toBe(false);
-    expect(TopicValidator::isValidSubscribeFilter('sen+ors'))->toBe(false);
+    expect(TopicValidator::isValidSubscribeFilter(''))->toBeFalse()
+        ->and(TopicValidator::isValidSubscribeFilter('sen+ors'))->toBeFalse();
 });

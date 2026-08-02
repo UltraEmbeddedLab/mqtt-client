@@ -122,8 +122,8 @@ test('encodePublish QoS 0 creates valid packet without packetId', function (): v
     $data    = $encoder->encodePublish($pkt);
 
     // First byte: PUBLISH type (3) << 4 = 0x30, QoS 0 = no extra bits
-    expect(ord($data[0]) & 0xF0)->toBe(PacketType::PUBLISH->value << 4);
-    expect((ord($data[0]) >> 1) & 0x03)->toBe(0); // QoS 0
+    expect(ord($data[0]) & 0xF0)->toBe(PacketType::PUBLISH->value << 4)
+        ->and((ord($data[0]) >> 1) & 0x03)->toBe(0); // QoS 0
 
     // Packet should contain the topic and payload
     expect(str_contains($data, 'test/topic'))->toBeTrue()

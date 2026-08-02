@@ -55,29 +55,29 @@ $client    = new Client($options, $transport);
 
 echo "🔌 Connecting to MQTT 3.1.1 broker...\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId\n\n";
 
 try {
     $result = $client->connect();
 
     echo "✅ Successfully connected to MQTT 3.1.1 broker\n\n";
     echo "📥 CONNACK Response from broker:\n";
-    echo "   Protocol: {$result->protocol} {$result->version}\n";
+    echo "   Protocol: $result->protocol $result->version\n";
     echo '   Session Present: '.($result->sessionPresent ? 'yes' : 'no')."\n";
-    echo "   Return Code: {$result->reasonCode}";
+    echo "   Return Code: $result->reasonCode";
 
     // Use ConnAck's enhanced functionality to decode return code
     if ($result->connAck !== null) {
         $description = $result->connAck->getReasonDescription($result->version);
-        echo " ({$description})\n";
+        echo " ($description)\n";
         echo '   Connection Status: '.($result->connAck->isSuccess() ? '✅ Success' : '❌ Failed')."\n";
     } else {
         echo "\n";
     }
 
     if ($result->assignedClientId !== null) {
-        echo "   Assigned Client ID: {$result->assignedClientId}\n";
+        echo "   Assigned Client ID: $result->assignedClientId\n";
     }
 
     echo "\n👋 Disconnecting...";

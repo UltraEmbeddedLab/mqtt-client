@@ -35,4 +35,4 @@ Mqtt::publish(
     tlsOptions: $config['tls']    ?? null,
 );
 
-echo "✅ Message published to {$topic}\n";
+echo "✅ Message published to $topic\n";

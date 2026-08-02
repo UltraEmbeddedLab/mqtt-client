@@ -31,16 +31,17 @@ require __DIR__.'/../vendor/autoload.php';
 $configFile = is_file(__DIR__.'/config.php') ? __DIR__.'/config.php' : __DIR__.'/config.php.dist';
 $config     = require $configFile;
 
-// Choose MQTT version: 'v3' or 'v5'
-$testVersion = 'v5'; // ← CHANGE THIS TO TEST DIFFERENT VERSIONS
+// Choose the MQTT version without editing this file:
+//   MQTT_EXAMPLE_VERSION=v3 php examples/qos0_example.php
+$testVersion = getenv('MQTT_EXAMPLE_VERSION') ?: 'v5';
 
 $version    = $testVersion === 'v5' ? MqttVersion::V5_0 : MqttVersion::V3_1_1;
 $versionStr = $testVersion === 'v5' ? '5.0' : '3.1.1';
 
 // Setup client ID
-$clientId = "php-iot-qos0-{$testVersion}-fallback";
+$clientId = "php-iot-qos0-$testVersion-fallback";
 try {
-    $clientId = "php-iot-qos0-{$testVersion}-".RandomId::clientId(6);
+    $clientId = "php-iot-qos0-$testVersion-".RandomId::clientId(6);
 } catch (RandomException $e) {
     // Keep fallback client ID
 }
@@ -75,19 +76,19 @@ $transport = new TcpTransport();
 $client    = new Client($options, $transport);
 
 echo "🔌 QoS 0 (At Most Once) Publishing Example\n";
-echo "   MQTT Version: {$versionStr}\n";
+echo "   MQTT Version: $versionStr\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId\n\n";
 
 try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused by broker (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused by broker (reason code: $result->reasonCode)");
     }
 
-    echo "✅ Successfully connected to MQTT {$versionStr} broker\n";
+    echo "✅ Successfully connected to MQTT $versionStr broker\n";
     echo '   Session Present: '.($result->sessionPresent ? 'yes' : 'no')."\n\n";
 
     echo "📤 Publishing messages with QoS 0 (Fire and Forget)...\n\n";
@@ -104,7 +105,7 @@ try {
         new PublishOptions(qos: QoS::AtMostOnce)
     );
 
-    echo "   ✅ Published (Packet ID: {$packetId1}, no PUBACK expected)\n";
+    echo "   ✅ Published (Packet ID: $packetId1, no PUBACK expected)\n";
     echo "   ⚡ Fast: No acknowledgment wait time\n\n";
 
     // Example 2: Multiple rapid QoS 0 publishes
@@ -112,9 +113,9 @@ try {
     echo "   Demonstrating high-throughput capability of QoS 0\n\n";
 
     for ($i = 1; $i <= 4; $i++) {
-        $topic   = "php-iot/stream/data/{$i}";
-        $payload = "data-{$i}-".time();
-        echo "   Publishing to {$topic}: {$payload}\n";
+        $topic   = "php-iot/stream/data/$i";
+        $payload = "data-$i-".time();
+        echo "   Publishing to $topic: $payload\n";
 
         $client->publish(
             $topic,

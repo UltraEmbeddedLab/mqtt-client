@@ -9,8 +9,8 @@ test('default constructor sets savedAt to current time', function (): void {
     $state  = new SessionState();
     $after  = time();
 
-    expect($state->savedAt)->toBeGreaterThanOrEqual($before);
-    expect($state->savedAt)->toBeLessThanOrEqual($after);
+    expect($state->savedAt)->toBeGreaterThanOrEqual($before)
+        ->and($state->savedAt)->toBeLessThanOrEqual($after);
 });
 
 test('explicit savedAt is preserved', function (): void {
@@ -20,35 +20,35 @@ test('explicit savedAt is preserved', function (): void {
 
 test('isExpired returns false when expirySeconds is 0', function (): void {
     $state = new SessionState(savedAt: 1);
-    expect($state->isExpired(0))->toBe(false);
+    expect($state->isExpired(0))->toBeFalse();
 });
 
 test('isExpired returns false for fresh session', function (): void {
     $state = new SessionState();
-    expect($state->isExpired(3600))->toBe(false);
+    expect($state->isExpired(3600))->toBeFalse();
 });
 
 test('isExpired returns true for old session', function (): void {
     $state = new SessionState(savedAt: time() - 7200);
-    expect($state->isExpired(3600))->toBe(true);
+    expect($state->isExpired(3600))->toBeTrue();
 });
 
 test('hasSubscriptions true/false', function (): void {
     $empty = new SessionState();
-    expect($empty->hasSubscriptions())->toBe(false);
+    expect($empty->hasSubscriptions())->toBeFalse();
 
     $withSubs = new SessionState(subscriptions: [
         'sensors/temp' => ['qos' => 1, 'options' => null],
     ]);
-    expect($withSubs->hasSubscriptions())->toBe(true);
+    expect($withSubs->hasSubscriptions())->toBeTrue();
 });
 
 test('hasPendingQos2 true/false', function (): void {
     $empty = new SessionState();
-    expect($empty->hasPendingQos2())->toBe(false);
+    expect($empty->hasPendingQos2())->toBeFalse();
 
     $withPending = new SessionState(pendingQos2: [1234, 5678]);
-    expect($withPending->hasPendingQos2())->toBe(true);
+    expect($withPending->hasPendingQos2())->toBeTrue();
 });
 
 test('getSubscriptionCount returns correct count', function (): void {
@@ -69,16 +69,16 @@ test('toArray/fromArray roundtrip preserves data', function (): void {
     $array    = $original->toArray();
     $restored = SessionState::fromArray($array);
 
-    expect($restored->subscriptions)->toBe($original->subscriptions);
-    expect($restored->pendingQos2)->toBe($original->pendingQos2);
-    expect($restored->savedAt)->toBe($original->savedAt);
+    expect($restored->subscriptions)->toBe($original->subscriptions)
+        ->and($restored->pendingQos2)->toBe($original->pendingQos2)
+        ->and($restored->savedAt)->toBe($original->savedAt);
 });
 
 test('fromArray handles missing keys gracefully', function (): void {
     $state = SessionState::fromArray([]);
 
-    expect($state->subscriptions)->toBe([]);
-    expect($state->pendingQos2)->toBe([]);
+    expect($state->subscriptions)->toBe([])
+        ->and($state->pendingQos2)->toBe([]);
     // savedAt defaults to current time when 0 is passed
     expect($state->savedAt)->toBeGreaterThan(0);
 });

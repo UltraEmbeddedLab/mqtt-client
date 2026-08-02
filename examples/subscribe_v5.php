@@ -57,14 +57,14 @@ $client    = new Client($options, $transport);
 
 echo "🔌 Connecting to MQTT 5.0 broker...\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId\n\n";
 
 try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused by broker (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused by broker (reason code: $result->reasonCode)");
     }
 
     echo "✅ Successfully connected to MQTT 5.0 broker\n";
@@ -88,7 +88,7 @@ try {
     // ============================================================================
     echo "📨 Subscription 1: Basic with No Local option\n";
     echo "   Topics:\n";
-    echo "      - {$topic} (QoS 1)\n";
+    echo "      - $topic (QoS 1)\n";
     echo "      - php-iot/test/v5 (QoS 1)\n";
     echo "   Options:\n";
     echo "      - No Local: true (won't receive own publications)\n";
@@ -102,12 +102,12 @@ try {
     $subResult = $client->subscribeWith($filters1, $options1);
 
     echo "\n✅ Subscription 1 successful\n";
-    echo "   Packet ID: {$subResult->packetId}\n";
+    echo "   Packet ID: $subResult->packetId\n";
     echo "   Granted QoS codes:\n";
     foreach ($subResult->results as $idx => $code) {
-        $qosGranted  = $code <= 2 ? "QoS {$code}" : "Failure (0x{$code})";
+        $qosGranted  = $code <= 2 ? "QoS $code" : "Failure (0x$code)";
         $topicFilter = $filters1[$idx]['filter'] ?? 'unknown';
-        echo "      - {$topicFilter}: {$qosGranted}\n";
+        echo "      - $topicFilter: $qosGranted\n";
     }
     echo "\n";
 
@@ -129,12 +129,12 @@ try {
     $subResult = $client->subscribeWith($filters2, $options2);
 
     echo "\n✅ Subscription 2 successful\n";
-    echo "   Packet ID: {$subResult->packetId}\n";
+    echo "   Packet ID: $subResult->packetId\n";
     echo "   Granted QoS codes:\n";
     foreach ($subResult->results as $idx => $code) {
-        $qosGranted  = $code <= 2 ? "QoS {$code}" : "Failure (0x{$code})";
+        $qosGranted  = $code <= 2 ? "QoS $code" : "Failure (0x$code)";
         $topicFilter = $filters2[$idx]['filter'] ?? 'unknown';
-        echo "      - {$topicFilter}: {$qosGranted}\n";
+        echo "      - $topicFilter: $qosGranted\n";
     }
     echo "\n";
 
@@ -171,12 +171,12 @@ try {
     $subResult = $client->subscribeWith($filters3, $options3);
 
     echo "\n✅ Subscription 3 successful\n";
-    echo "   Packet ID: {$subResult->packetId}\n";
+    echo "   Packet ID: $subResult->packetId\n";
     echo "   Granted QoS codes:\n";
     foreach ($subResult->results as $idx => $code) {
-        $qosGranted  = $code <= 2 ? "QoS {$code}" : "Failure (0x{$code})";
+        $qosGranted  = $code <= 2 ? "QoS $code" : "Failure (0x$code)";
         $topicFilter = $filters3[$idx]['filter'] ?? 'unknown';
-        echo "      - {$topicFilter}: {$qosGranted}\n";
+        echo "      - $topicFilter: $qosGranted\n";
     }
     echo "\n";
 
@@ -185,17 +185,17 @@ try {
     // ============================================================================
     echo "🎧 Listening for messages (press Ctrl+C to stop)...\n";
     echo "   Waiting for messages on all subscribed topics...\n";
-    echo "   Main topic: {$topic}\n";
-    echo "   You can test by publishing to: {$topic}\n";
+    echo "   Main topic: $topic\n";
+    echo "   You can test by publishing to: $topic\n";
     echo "   Example: php examples/publish_v5.php\n\n";
 
     // Set up message handler
     $messageCount = 0;
     $client->onMessage(function ($message) use (&$messageCount) {
         $messageCount++;
-        echo "\n📬 Message #{$messageCount} received:\n";
-        echo "   Topic: {$message->topic}\n";
-        echo "   Payload: {$message->payload}\n";
+        echo "\n📬 Message #$messageCount received:\n";
+        echo "   Topic: $message->topic\n";
+        echo "   Payload: $message->payload\n";
         echo "   QoS: {$message->qos->value}\n";
         echo '   Retain: '.($message->retain ? 'yes' : 'no')."\n";
         if ($message->dup) {
@@ -221,7 +221,7 @@ try {
             if (isset($message->properties['user_properties']) && is_array($message->properties['user_properties'])) {
                 echo "      - User Properties:\n";
                 foreach ($message->properties['user_properties'] as $key => $value) {
-                    echo "         * {$key}: {$value}\n";
+                    echo "         * $key: $value\n";
                 }
             }
         }
@@ -235,8 +235,8 @@ try {
         $client->loopOnce(1.0);
     }
 
-    echo "\n⏱️  Listening timeout ({$duration} seconds)\n";
-    echo "   Total messages received: {$messageCount}\n\n";
+    echo "\n⏱️  Listening timeout ($duration seconds)\n";
+    echo "   Total messages received: $messageCount\n\n";
 
     echo "📊 Summary:\n";
     echo "   Total subscriptions: 3\n";

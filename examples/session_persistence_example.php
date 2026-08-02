@@ -50,19 +50,19 @@ $sessionDir   = sys_get_temp_dir().'/mqtt-sessions';
 $sessionStore = new FileSessionStore($sessionDir, defaultExpirySeconds: 3600); // 1 hour expiry
 
 echo "Session Persistence Example\n";
-echo "   Session Directory: {$sessionDir}\n\n";
+echo "   Session Directory: $sessionDir\n\n";
 
 // Check if we have a saved session
 if ($sessionStore->exists($clientId)) {
     $state = $sessionStore->load($clientId);
     if ($state !== null) {
-        echo "Found existing session for '{$clientId}':\n";
+        echo "Found existing session for '$clientId':\n";
         echo "   Subscriptions: {$state->getSubscriptionCount()}\n";
         echo "   Age: {$state->getAge()} seconds\n";
         echo '   Saved at: '.date('Y-m-d H:i:s', $state->savedAt)."\n\n";
     }
 } else {
-    echo "No existing session found for '{$clientId}'.\n";
+    echo "No existing session found for '$clientId'.\n";
     echo "A new session will be created.\n\n";
 }
 
@@ -97,15 +97,15 @@ $client    = new Client($options, $transport);
 
 echo "Connecting with cleanSession=false...\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}\n";
-echo "   Session Expiry: {$options->sessionExpiry} seconds\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId\n";
+echo "   Session Expiry: $options->sessionExpiry seconds\n\n";
 
 try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused (reason code: $result->reasonCode)");
     }
 
     echo "Connected to MQTT broker\n";
@@ -122,7 +122,7 @@ try {
     echo "Subscribing to topics (will be persisted)...\n";
     $topics = ['sensors/+/temperature', 'alerts/#'];
     foreach ($topics as $topic) {
-        echo "   Subscribing to: {$topic}\n";
+        echo "   Subscribing to: $topic\n";
         $client->subscribe([$topic], qos: 1);
     }
     echo "\n";
@@ -137,7 +137,7 @@ try {
     while (microtime(true) < $deadline) {
         $msg = $client->awaitMessage(0.5);
         if ($msg !== null) {
-            echo "   Received: {$msg->topic} -> {$msg->payload}\n";
+            echo "   Received: $msg->topic -> $msg->payload\n";
         }
     }
     echo "\n";
@@ -153,7 +153,7 @@ try {
             echo "\nSession saved successfully:\n";
             echo "   Subscriptions: {$state->getSubscriptionCount()}\n";
             foreach ($state->subscriptions as $filter => $settings) {
-                echo "      - {$filter} (QoS {$settings['qos']})\n";
+                echo "      - $filter (QoS {$settings['qos']})\n";
             }
         }
     }

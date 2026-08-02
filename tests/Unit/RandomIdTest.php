@@ -1,5 +1,7 @@
 <?php
 
+/** @noinspection PhpUnhandledExceptionInspection — a throwing test is a failing test; Pest reports it. */
+
 declare(strict_types=1);
 
 use ScienceStories\Mqtt\Util\RandomId;
@@ -32,9 +34,9 @@ test('packetId starts at 1', function (): void {
 });
 
 test('packetId increments sequentially', function (): void {
-    expect(RandomId::packetId())->toBe(1);
-    expect(RandomId::packetId())->toBe(2);
-    expect(RandomId::packetId())->toBe(3);
+    expect(RandomId::packetId())->toBe(1)
+        ->and(RandomId::packetId())->toBe(2)
+        ->and(RandomId::packetId())->toBe(3);
 });
 
 test('packetId wraps at 65535 back to 1', function (): void {

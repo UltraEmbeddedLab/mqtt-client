@@ -6,14 +6,12 @@ namespace ScienceStories\Mqtt\Transport;
 
 use Random\RandomException;
 use ScienceStories\Mqtt\Client\Options;
-use ScienceStories\Mqtt\Client\TlsOptions;
 use ScienceStories\Mqtt\Contract\TransportInterface;
 use ScienceStories\Mqtt\Exception\ProtocolError;
 use ScienceStories\Mqtt\Exception\Timeout;
 use ScienceStories\Mqtt\Exception\TransportError;
 use Throwable;
 
-use function array_key_exists;
 use function base64_encode;
 use function chr;
 use function explode;
@@ -22,7 +20,6 @@ use function feof;
 use function floor;
 use function fread;
 use function fwrite;
-use function is_array;
 use function is_resource;
 use function max;
 use function microtime;
@@ -33,13 +30,10 @@ use function sha1;
 use function sprintf;
 use function str_contains;
 use function stream_context_create;
-use function stream_context_get_options;
-use function stream_context_set_option;
 use function stream_select;
 use function stream_set_blocking;
 use function stream_set_timeout;
 use function stream_socket_client;
-use function stream_socket_enable_crypto;
 use function strlen;
 use function substr;
 use function trim;
@@ -60,6 +54,8 @@ use function usleep;
  */
 final class WsTransport implements TransportInterface
 {
+    /** Owns $context and $tlsEnabled, and the whole TLS upgrade. */
+    use NegotiatesTls;
     /**
      * The GUID RFC 6455 §1.3 requires servers to append to Sec-WebSocket-Key before
      * hashing. Exactly 36 characters — a single wrong character makes every handshake
@@ -77,11 +73,6 @@ final class WsTransport implements TransportInterface
 
     /** @var resource|null */
     private $stream;
-
-    /** @var resource|null */
-    private $context;
-
-    private bool $tlsEnabled = false;
 
     /** Buffer for reassembling fragmented MQTT data */
     private string $mqttBuffer = '';
@@ -218,9 +209,8 @@ final class WsTransport implements TransportInterface
      */
     public function enableTls(?array $tlsOptions = null): void
     {
-        if (!extension_loaded('openssl')) {
-            throw new TransportError('WebSocket: Cannot enable TLS: ext-openssl is not loaded');
-        }
+        $this->assertTlsAvailable('WebSocket: ');
+
         if (!$this->isOpen()) {
             throw new TransportError('WebSocket: Cannot enable TLS: transport is not open');
         }
@@ -233,73 +223,7 @@ final class WsTransport implements TransportInterface
             throw new TransportError('Invalid stream resource');
         }
 
-        if ($tlsOptions) {
-            if (!is_resource($this->context)) {
-                $this->context = stream_context_create([]);
-            }
-            foreach ($tlsOptions as $wrapper => $opts) {
-                if ($wrapper !== 'ssl' || !is_array($opts)) {
-                    $wrapper = 'ssl';
-                    $opts    = $tlsOptions;
-                }
-                foreach ($opts as $k => $v) {
-                    @stream_context_set_option($this->context, $wrapper, (string) $k, $v);
-                }
-            }
-        }
-
-        if ($this->context) {
-            $opts = stream_context_get_options($this->context);
-            $ssl  = is_array($opts['ssl'] ?? null) ? $opts['ssl'] : [];
-            if (!array_key_exists('SNI_enabled', $ssl)) {
-                @stream_context_set_option($this->context, 'ssl', 'SNI_enabled', true);
-            }
-            if (!array_key_exists('verify_peer', $ssl)) {
-                @stream_context_set_option($this->context, 'ssl', 'verify_peer', true);
-            }
-            if (!array_key_exists('verify_peer_name', $ssl)) {
-                @stream_context_set_option($this->context, 'ssl', 'verify_peer_name', true);
-            }
-        }
-
-        // TLS 1.2+1.3 by default; STREAM_CRYPTO_METHOD_TLS_CLIENT would also allow
-        // TLS 1.0/1.1 (RFC 8996: MUST NOT). Overridable via TlsOptions::withCryptoMethod().
-        $method = TlsOptions::DEFAULT_CRYPTO_METHOD;
-        if (is_resource($this->context)) {
-            $ctxOpts    = stream_context_get_options($this->context);
-            $ssl        = is_array($ctxOpts['ssl'] ?? null) ? $ctxOpts['ssl'] : [];
-            $configured = $ssl['crypto_method'] ?? null;
-            if (is_int($configured)) {
-                $method = $configured;
-            }
-        }
-
-        $result = @stream_socket_enable_crypto($stream, true, $method);
-        if ($result !== true) {
-            $detail = $this->tlsErrorDetail();
-            $this->close();
-
-            throw new TransportError('WebSocket: TLS negotiation failed'.($detail === '' ? '' : ": $detail"));
-        }
-
-        $this->tlsEnabled = true;
-    }
-
-    /** Collect whatever OpenSSL and PHP recorded about the failed handshake. */
-    private function tlsErrorDetail(): string
-    {
-        $parts = [];
-        if (function_exists('openssl_error_string')) {
-            while (($err = openssl_error_string()) !== false) {
-                $parts[] = $err;
-            }
-        }
-        $last = error_get_last();
-        if ($last !== null && $last['message'] !== '') {
-            $parts[] = $last['message'];
-        }
-
-        return implode('; ', $parts);
+        $this->negotiateTls($stream, $tlsOptions, 'WebSocket: ');
     }
 
     /**
@@ -449,7 +373,7 @@ final class WsTransport implements TransportInterface
         if ($payloadLen < 0 || $payloadLen > $this->maxFrameSize) {
             $this->close();
 
-            throw new ProtocolError("WebSocket frame of $payloadLen bytes exceeds the maximum of {$this->maxFrameSize}");
+            throw new ProtocolError("WebSocket frame of $payloadLen bytes exceeds the maximum of $this->maxFrameSize");
         }
 
         $mask = '';

@@ -84,21 +84,23 @@ $client    = new Client($options, $transport);
 
 echo "Shared Subscriptions Example (MQTT 5.0)\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId\n\n";
 
 try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused (reason code: $result->reasonCode)");
     }
 
     echo "Connected to MQTT 5.0 broker\n";
     echo '   Session Present: '.($result->sessionPresent ? 'yes' : 'no')."\n";
 
-    // Check if broker supports shared subscriptions
-    $sharedSupported = $result->connack->properties['shared_subscription_available'] ?? 1;
+    // Check if broker supports shared subscriptions. The property is optional: absent
+    // means "supported" per MQTT 5 §3.2.2.3.13. Note it is $connAck, not $connack — the
+    // latter is undefined and would silently make this check always report "yes".
+    $sharedSupported = $result->connAck?->isSharedSubscriptionAvailable() !== false;
     echo '   Shared Subscriptions Available: '.($sharedSupported ? 'yes' : 'no')."\n\n";
 
     if (! $sharedSupported) {
@@ -114,9 +116,9 @@ try {
     $sharedTopic = '$share/'.$shareGroup.'/'.$topicFilter;
 
     echo "Subscribing to shared topic:\n";
-    echo "   Share Group: {$shareGroup}\n";
-    echo "   Topic Filter: {$topicFilter}\n";
-    echo "   Full Topic: {$sharedTopic}\n\n";
+    echo "   Share Group: $shareGroup\n";
+    echo "   Topic Filter: $topicFilter\n";
+    echo "   Full Topic: $sharedTopic\n\n";
 
     $client->subscribe([$sharedTopic], qos: 1);
 
@@ -129,9 +131,9 @@ try {
     $messageCount = 0;
     $client->onMessage(function ($msg) use (&$messageCount, $clientId) {
         $messageCount++;
-        echo "[{$clientId}] Received message #{$messageCount}:\n";
-        echo "   Topic: {$msg->topic}\n";
-        echo "   Payload: {$msg->payload}\n";
+        echo "[$clientId] Received message #$messageCount:\n";
+        echo "   Topic: $msg->topic\n";
+        echo "   Payload: $msg->payload\n";
         echo "   QoS: {$msg->qos->value}\n\n";
     });
 

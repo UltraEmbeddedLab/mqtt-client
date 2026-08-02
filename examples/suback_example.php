@@ -19,15 +19,17 @@ $configFile = is_file(__DIR__.'/config.php') ? __DIR__.'/config.php' : __DIR__.'
 $config     = require $configFile;
 
 // Choose MQTT version: 'v3' or 'v5' (change this to test different versions)
-$testVersion = 'v5'; // ← CHANGE THIS TO 'v3' or 'v5'
+// Choose the MQTT version without editing this file:
+//   MQTT_EXAMPLE_VERSION=v3 php examples/suback_example.php
+$testVersion = getenv('MQTT_EXAMPLE_VERSION') ?: 'v5';
 
 $version    = $testVersion === 'v5' ? MqttVersion::V5_0 : MqttVersion::V3_1_1;
 $versionStr = $testVersion === 'v5' ? '5.0' : '3.1.1';
 
 // Setup client ID
-$clientId = "php-iot-suback-{$testVersion}-fallback";
+$clientId = "php-iot-suback-$testVersion-fallback";
 try {
-    $clientId = "php-iot-suback-{$testVersion}-".RandomId::clientId(6);
+    $clientId = "php-iot-suback-$testVersion-".RandomId::clientId(6);
 } catch (RandomException $e) {
     // Keep fallback client ID
 }
@@ -61,19 +63,19 @@ if (($config['scheme'] ?? 'tcp') === 'tls') {
 $transport = new TcpTransport();
 $client    = new Client($options, $transport);
 
-echo "🔌 Connecting to MQTT {$versionStr} broker...\n";
+echo "🔌 Connecting to MQTT $versionStr broker...\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId\n\n";
 
 try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused by broker (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused by broker (reason code: $result->reasonCode)");
     }
 
-    echo "✅ Successfully connected to MQTT {$versionStr} broker\n";
+    echo "✅ Successfully connected to MQTT $versionStr broker\n";
     echo '   Session Present: '.($result->sessionPresent ? 'yes' : 'no')."\n\n";
 
     // Example 1: Subscribe to multiple topics with different QoS levels
@@ -92,7 +94,7 @@ try {
     $subResult = $client->subscribeWith($filters);
 
     echo "📥 SUBACK Response:\n";
-    echo "   Packet ID: {$subResult->packetId}\n";
+    echo "   Packet ID: $subResult->packetId\n";
     echo '   Return Codes: ['.implode(', ', $subResult->results)."]\n";
 
     if ($subResult->subAck !== null) {
@@ -106,7 +108,7 @@ try {
             $code   = $subResult->results[$index] ?? null;
             $desc   = $descriptions[$index]       ?? 'Unknown';
             $status = ($code !== null && $code >= 0x00 && $code <= 0x02) ? '✅' : '❌';
-            echo "      {$status} {$filter['filter']}: Code 0x".dechex($code ?? 0)." ({$desc})\n";
+            echo "      $status {$filter['filter']}: Code 0x".dechex($code ?? 0)." ($desc)\n";
         }
 
         // Display MQTT 5.0 properties if available
@@ -119,7 +121,7 @@ try {
             if (count($userProps) > 0) {
                 echo "      User Properties:\n";
                 foreach ($userProps as $key => $value) {
-                    echo "         {$key}: {$value}\n";
+                    echo "         $key: $value\n";
                 }
             }
             if (!$subAck->hasProperty('reason_string') && count($userProps) === 0) {
@@ -149,13 +151,13 @@ try {
         $subResult2 = $client->subscribeWith($advancedFilters, $advancedOptions);
 
         echo "📥 SUBACK Response:\n";
-        echo "   Packet ID: {$subResult2->packetId}\n";
+        echo "   Packet ID: $subResult2->packetId\n";
         echo '   Return Code: 0x'.dechex($subResult2->results[0] ?? 0)."\n";
 
         if ($subResult2->subAck !== null) {
             $subAck2 = $subResult2->subAck;
             $desc    = $subAck2->getReasonDescription($subResult2->results[0] ?? 0, $versionStr);
-            echo "   Description: {$desc}\n";
+            echo "   Description: $desc\n";
             echo '   Status: '.($subAck2->isSuccess() ? '✅ Success' : '❌ Failed')."\n\n";
         }
     }

@@ -90,7 +90,7 @@ $eventDispatcher->addListener(ServerDisconnect::class, function (ServerDisconnec
     echo "\n========================================\n";
     echo "SERVER DISCONNECT EVENT RECEIVED\n";
     echo "========================================\n";
-    echo '   Reason Code: 0x'.dechex($disconnect->reasonCode)." ({$disconnect->reasonCode})\n";
+    echo '   Reason Code: 0x'.dechex($disconnect->reasonCode)." ($disconnect->reasonCode)\n";
     echo "   Description: {$disconnect->getReasonDescription()}\n";
     echo '   Is Error: '.($disconnect->isError() ? 'yes' : 'no')."\n";
     echo '   Is Normal: '.($disconnect->isNormal() ? 'yes' : 'no')."\n";
@@ -99,20 +99,20 @@ $eventDispatcher->addListener(ServerDisconnect::class, function (ServerDisconnec
     // Check for reason string
     $reasonString = $disconnect->getReasonString();
     if ($reasonString !== null) {
-        echo "   Reason String: {$reasonString}\n";
+        echo "   Reason String: $reasonString\n";
     }
 
     // Check for server reference (alternative server)
     $serverRef = $disconnect->getServerReference();
     if ($serverRef !== null) {
-        echo "   Server Reference: {$serverRef}\n";
+        echo "   Server Reference: $serverRef\n";
         echo "   (Consider connecting to this alternative server)\n";
     }
 
     // Check for session expiry update
     $sessionExpiry = $disconnect->getSessionExpiryInterval();
     if ($sessionExpiry !== null) {
-        echo "   Session Expiry: {$sessionExpiry} seconds\n";
+        echo "   Session Expiry: $sessionExpiry seconds\n";
     }
 
     // Log user properties
@@ -120,7 +120,7 @@ $eventDispatcher->addListener(ServerDisconnect::class, function (ServerDisconnec
     if (count($userProps) > 0) {
         echo "   User Properties:\n";
         foreach ($userProps as $key => $value) {
-            echo "      {$key}: {$value}\n";
+            echo "      $key: $value\n";
         }
     }
 
@@ -177,15 +177,15 @@ $client    = new Client($options, $transport, events: $eventDispatcher);
 
 echo "Server Disconnect Handling Example (MQTT 5.0)\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId\n";
 echo "   Auto-Reconnect: enabled\n\n";
 
 try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused (reason code: $result->reasonCode)");
     }
 
     echo "Connected to MQTT 5.0 broker\n";
@@ -201,7 +201,7 @@ try {
 
     // Set up message handler
     $client->onMessage(function ($msg) {
-        echo "Received: {$msg->topic} -> {$msg->payload}\n";
+        echo "Received: $msg->topic -> $msg->payload\n";
     });
 
     // Run message loop

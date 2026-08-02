@@ -63,15 +63,15 @@ $client    = new Client($options, $transport);
 
 echo "🔌 Connecting to MQTT 3.1.1 broker...\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}-v3\n";
-echo "   Keepalive: {$options->keepAlive} seconds\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId-v3\n";
+echo "   Keepalive: $options->keepAlive seconds\n\n";
 
 try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused by broker (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused by broker (reason code: $result->reasonCode)");
     }
 
     echo "✅ Successfully connected to MQTT 3.1.1 broker\n";
@@ -108,9 +108,9 @@ try {
 
         if ($success) {
             $latencies[] = $duration;
-            echo "   Ping {$i}/5: ".number_format($duration, 2)." ms\n";
+            echo "   Ping $i/5: ".number_format($duration, 2)." ms\n";
         } else {
-            echo "   Ping {$i}/5: timeout\n";
+            echo "   Ping $i/5: timeout\n";
         }
 
         // Small delay between pings
@@ -132,7 +132,7 @@ try {
     // Example 3: Observe auto-ping behavior
     // ============================================================================
     echo "📨 Example 3: Observing auto-ping behavior\n";
-    echo "   Keepalive is set to {$options->keepAlive} seconds\n";
+    echo "   Keepalive is set to $options->keepAlive seconds\n";
     echo "   Waiting 25 seconds to observe automatic PINGREQ...\n";
     echo '   (Auto-ping triggers at ~90% of keepalive interval: ~'.($options->keepAlive * 0.9)." seconds)\n\n";
 
@@ -146,7 +146,7 @@ try {
 
         // Show progress every 5 seconds
         if ($elapsed > 0 && $elapsed % 5 === 0 && time() !== $lastActivity) {
-            echo "   ... {$elapsed} seconds elapsed (waiting for auto-ping)\n";
+            echo "   ... $elapsed seconds elapsed (waiting for auto-ping)\n";
             $lastActivity = time();
         }
     }
@@ -198,15 +198,15 @@ $client    = new Client($options, $transport);
 
 echo "🔌 Connecting to MQTT 5.0 broker...\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}-v5\n";
-echo "   Keepalive: {$options->keepAlive} seconds\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId-v5\n";
+echo "   Keepalive: $options->keepAlive seconds\n\n";
 
 try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused by broker (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused by broker (reason code: $result->reasonCode)");
     }
 
     echo "✅ Successfully connected to MQTT 5.0 broker\n";

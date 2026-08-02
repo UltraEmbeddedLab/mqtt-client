@@ -58,14 +58,14 @@ $client    = new Client($options, $transport);
 
 echo "🔌 Connecting to MQTT 5.0 broker...\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId\n\n";
 
 try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused by broker (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused by broker (reason code: $result->reasonCode)");
     }
 
     echo "✅ Successfully connected to MQTT 5.0 broker\n";
@@ -78,7 +78,7 @@ try {
 
     // 1. Simple QoS 0 publish with content type
     echo "📨 Message 1: Simple JSON with content type\n";
-    echo "   Topic: {$topic}/json\n";
+    echo "   Topic: $topic/json\n";
     echo "   Payload: {\"temperature\":22.5,\"humidity\":65}\n";
     echo "   QoS: 0\n";
     echo "   Properties:\n";
@@ -86,7 +86,7 @@ try {
     echo "      - payload_format_indicator: 1 (UTF-8 text)\n";
 
     $client->publish(
-        "{$topic}/json",
+        "$topic/json",
         '{"temperature":22.5,"humidity":65}',
         new PublishOptions(
             qos: QoS::AtMostOnce,
@@ -101,7 +101,7 @@ try {
 
     // 2. QoS 1 with message expiry and user properties
     echo "📨 Message 2: Sensor data with expiry and metadata\n";
-    echo "   Topic: {$topic}/sensor\n";
+    echo "   Topic: $topic/sensor\n";
     echo "   Payload: Sensor reading from warehouse\n";
     echo "   QoS: 1\n";
     echo "   Properties:\n";
@@ -112,7 +112,7 @@ try {
     echo "         * unit: celsius\n";
 
     $packetId1 = $client->publish(
-        "{$topic}/sensor",
+        "$topic/sensor",
         'Sensor reading from warehouse',
         new PublishOptions(
             qos: QoS::AtLeastOnce,
@@ -127,37 +127,37 @@ try {
         )
     );
 
-    echo "   ✅ Published and acknowledged (Packet ID: {$packetId1})\n\n";
+    echo "   ✅ Published and acknowledged (Packet ID: $packetId1)\n\n";
 
     // 3. QoS 2 with response topic and correlation data (request/response pattern)
     echo "📨 Message 3: Request with response topic (request/response pattern)\n";
-    echo "   Topic: {$topic}/request\n";
+    echo "   Topic: $topic/request\n";
     echo "   Payload: get-device-status\n";
     echo "   QoS: 2\n";
     echo "   Properties:\n";
-    echo "      - response_topic: {$topic}/response\n";
+    echo "      - response_topic: $topic/response\n";
     echo '      - correlation_data: req-'.time()."\n";
     echo "      - content_type: text/plain\n";
 
     $correlationId = 'req-'.time();
     $packetId2     = $client->publish(
-        "{$topic}/request",
+        "$topic/request",
         'get-device-status',
         new PublishOptions(
             qos: QoS::ExactlyOnce,
             properties: [
-                'response_topic'   => "{$topic}/response",
+                'response_topic'   => "$topic/response",
                 'correlation_data' => $correlationId,
                 'content_type'     => 'text/plain',
             ]
         )
     );
 
-    echo "   ✅ Published with QoS 2 handshake complete (Packet ID: {$packetId2})\n\n";
+    echo "   ✅ Published with QoS 2 handshake complete (Packet ID: $packetId2)\n\n";
 
     // 4. Retained message with multiple properties
     echo "📨 Message 4: Status update with retain and comprehensive properties\n";
-    echo "   Topic: {$topic}/status\n";
+    echo "   Topic: $topic/status\n";
     echo "   Payload: {\"status\":\"online\",\"version\":\"1.0.0\"}\n";
     echo "   QoS: 1\n";
     echo "   Retain: true\n";
@@ -170,7 +170,7 @@ try {
     echo "         * firmware: 2.1.5\n";
 
     $packetId3 = $client->publish(
-        "{$topic}/status",
+        "$topic/status",
         '{"status":"online","version":"1.0.0"}',
         new PublishOptions(
             qos: QoS::AtLeastOnce,
@@ -187,11 +187,11 @@ try {
         )
     );
 
-    echo "   ✅ Published, acknowledged, and retained (Packet ID: {$packetId3})\n\n";
+    echo "   ✅ Published, acknowledged, and retained (Packet ID: $packetId3)\n\n";
 
     // 5. Binary payload with correlation data
     echo "📨 Message 5: Binary data with metadata\n";
-    echo "   Topic: {$topic}/binary\n";
+    echo "   Topic: $topic/binary\n";
     echo "   Payload: [binary data - 32 bytes]\n";
     echo "   QoS: 0\n";
     echo "   Properties:\n";
@@ -202,7 +202,7 @@ try {
 
     $binaryData = random_bytes(32);
     $client->publish(
-        "{$topic}/binary",
+        "$topic/binary",
         $binaryData,
         new PublishOptions(
             qos: QoS::AtMostOnce,

@@ -1,10 +1,13 @@
 <?php
 
+/** @noinspection PhpUnhandledExceptionInspection — a throwing test is a failing test; Pest reports it. */
+
 declare(strict_types=1);
 
 namespace ScienceStories\Mqtt\Tests\Integration;
 
 use ScienceStories\Mqtt\Client\Client;
+use ScienceStories\Mqtt\Client\InboundMessage;
 use ScienceStories\Mqtt\Client\Options;
 use ScienceStories\Mqtt\Client\PublishOptions;
 use ScienceStories\Mqtt\Protocol\MqttVersion;
@@ -18,7 +21,7 @@ beforeEach(function (): void {
     // Skip if broker not available
     $socket = @fsockopen($host, $port, $errno, $errstr, 1);
     if ($socket === false) {
-        $this->markTestSkipped("MQTT broker not available at {$host}:{$port}");
+        $this->markTestSkipped("MQTT broker not available at $host:$port");
     }
     fclose($socket);
 
@@ -37,8 +40,8 @@ test('connects and disconnects with MQTT 3.1.1', function (): void {
     $client = new Client($options, new TcpTransport());
     $result = $client->connect();
 
-    expect($result->reasonCode)->toBe(0);
-    expect($result->protocol)->toBe('MQTT');
+    expect($result->reasonCode)->toBe(0)
+        ->and($result->protocol)->toBe('MQTT');
 
     $client->disconnect();
 });
@@ -69,7 +72,7 @@ test('ping succeeds after connect', function (): void {
     $client = new Client($options, new TcpTransport());
     $client->connect();
 
-    $result = $client->ping(5.0);
+    $result = $client->ping();
     expect($result)->toBeTrue();
 
     $client->disconnect();
@@ -143,7 +146,7 @@ test('subscribe and receive message', function (): void {
     );
     $subscriber = new Client($subOptions, new TcpTransport());
     $subscriber->connect();
-    $subscriber->subscribe([$topic], 0);
+    $subscriber->subscribe([$topic]);
 
     // Give broker time to process subscription
     usleep(100_000);
@@ -153,9 +156,9 @@ test('subscribe and receive message', function (): void {
 
     // Receive
     $msg = $subscriber->awaitMessage(5.0);
-    expect($msg)->not->toBeNull();
-    expect($msg->topic)->toBe($topic);
-    expect($msg->payload)->toBe('integration test payload');
+    expect($msg)->not->toBeNull()
+        ->and($msg->topic)->toBe($topic)
+        ->and($msg->payload)->toBe('integration test payload');
 
     $subscriber->disconnect();
     $publisher->disconnect();
@@ -183,14 +186,14 @@ test('unsubscribe stops message delivery', function (): void {
         new TcpTransport(),
     );
     $subscriber->connect();
-    $subscriber->subscribe([$topic], 0);
+    $subscriber->subscribe([$topic]);
     usleep(100_000);
 
     // While subscribed, the message arrives.
     $publisher->publish($topic, 'before-unsubscribe');
     $before = $subscriber->awaitMessage(5.0);
-    expect($before)->not->toBeNull();
-    expect($before->payload)->toBe('before-unsubscribe');
+    expect($before)->not->toBeNull()
+        ->and($before->payload)->toBe('before-unsubscribe');
 
     // After UNSUBACK, the same topic must go quiet.
     $subscriber->unsubscribe([$topic]);
@@ -250,19 +253,19 @@ test('multiple sequential publishes are all delivered', function (): void {
         new TcpTransport(),
     );
     $subscriber->connect();
-    $subscriber->subscribe(["{$prefix}/#"], 1);
+    $subscriber->subscribe(["$prefix/#"], 1);
     usleep(100_000);
 
     // QoS 1 in both directions so the assertion is about delivery, not timing.
     for ($i = 0; $i < 10; $i++) {
-        $publisher->publish("{$prefix}/{$i}", "message {$i}", new PublishOptions(qos: QoS::AtLeastOnce));
+        $publisher->publish("$prefix/$i", "message $i", new PublishOptions(qos: QoS::AtLeastOnce));
     }
 
     $received = [];
     $deadline = microtime(true) + 10.0;
     while (count($received) < 10 && microtime(true) < $deadline) {
         $msg = $subscriber->awaitMessage(0.5);
-        if ($msg instanceof \ScienceStories\Mqtt\Client\InboundMessage) {
+        if ($msg instanceof InboundMessage) {
             $received[] = $msg->payload;
         }
     }

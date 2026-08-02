@@ -22,10 +22,10 @@ test('MessageReceived stores message', function (): void {
 
     $event = new MessageReceived($message);
 
-    expect($event->message)->toBe($message);
-    expect($event->message->topic)->toBe('sensors/temp');
-    expect($event->message->payload)->toBe('22.5');
-    expect($event->message->qos)->toBe(QoS::AtLeastOnce);
+    expect($event->message)->toBe($message)
+        ->and($event->message->topic)->toBe('sensors/temp')
+        ->and($event->message->payload)->toBe('22.5')
+        ->and($event->message->qos)->toBe(QoS::AtLeastOnce);
 });
 
 test('PacketReceived stores all properties', function (): void {
@@ -36,10 +36,10 @@ test('PacketReceived stores all properties', function (): void {
         remainingLength: 5,
     );
 
-    expect($event->bytes)->toBe("\x30\x05");
-    expect($event->packetType)->toBe(3);
-    expect($event->flags)->toBe(0);
-    expect($event->remainingLength)->toBe(5);
+    expect($event->bytes)->toBe("\x30\x05")
+        ->and($event->packetType)->toBe(3)
+        ->and($event->flags)->toBe(0)
+        ->and($event->remainingLength)->toBe(5);
 });
 
 test('PacketSent stores bytes and type', function (): void {
@@ -48,32 +48,32 @@ test('PacketSent stores bytes and type', function (): void {
         packetType: 12,
     );
 
-    expect($event->bytes)->toBe("\xC0\x00");
-    expect($event->packetType)->toBe(12);
+    expect($event->bytes)->toBe("\xC0\x00")
+        ->and($event->packetType)->toBe(12);
 });
 
 test('ServerDisconnect stores disconnect and willReconnect', function (): void {
     $disconnect = new Disconnect(reasonCode: 0x8B);
     $event      = new ServerDisconnect($disconnect, willReconnect: true);
 
-    expect($event->disconnect)->toBe($disconnect);
-    expect($event->willReconnect)->toBe(true);
+    expect($event->disconnect)->toBe($disconnect)
+        ->and($event->willReconnect)->toBeTrue();
 });
 
 test('ServerDisconnect isNormal for code 0', function (): void {
     $disconnect = new Disconnect(reasonCode: 0x00);
     $event      = new ServerDisconnect($disconnect);
 
-    expect($event->isNormal())->toBe(true);
-    expect($event->isError())->toBe(false);
+    expect($event->isNormal())->toBeTrue()
+        ->and($event->isError())->toBeFalse();
 });
 
 test('ServerDisconnect isError for code >= 0x80', function (): void {
     $disconnect = new Disconnect(reasonCode: 0x8B);
     $event      = new ServerDisconnect($disconnect);
 
-    expect($event->isError())->toBe(true);
-    expect($event->isNormal())->toBe(false);
+    expect($event->isError())->toBeTrue()
+        ->and($event->isNormal())->toBeFalse();
 });
 
 test('ServerDisconnect getReasonDescription returns meaningful text', function (): void {

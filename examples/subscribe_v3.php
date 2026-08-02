@@ -56,14 +56,14 @@ $client    = new Client($options, $transport);
 
 echo "🔌 Connecting to MQTT 3.1.1 broker...\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId\n\n";
 
 try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused by broker (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused by broker (reason code: $result->reasonCode)");
     }
 
     echo "✅ Successfully connected to MQTT 3.1.1 broker\n";
@@ -97,26 +97,26 @@ try {
     $subResult = $client->subscribeWith($filters);
 
     echo "\n✅ Subscription successful\n";
-    echo "   Packet ID: {$subResult->packetId}\n";
+    echo "   Packet ID: $subResult->packetId\n";
     echo "   Granted QoS codes:\n";
     foreach ($subResult->results as $idx => $code) {
-        $qosGranted  = $code <= 2 ? "QoS {$code}" : 'Failure (0x80)';
+        $qosGranted  = $code <= 2 ? "QoS $code" : 'Failure (0x80)';
         $topicFilter = $filters[$idx]['filter'] ?? 'unknown';
-        echo "      - {$topicFilter}: {$qosGranted}\n";
+        echo "      - $topicFilter: $qosGranted\n";
     }
 
     echo "\n🎧 Listening for messages (press Ctrl+C to stop)...\n";
     echo "   Waiting for messages on subscribed topics...\n";
-    echo "   You can test by publishing to: {$topic}\n";
+    echo "   You can test by publishing to: $topic\n";
     echo "   Example: php examples/publish_v3.php\n\n";
 
     // Set up a message handler
     $messageCount = 0;
     $client->onMessage(function ($message) use (&$messageCount) {
         $messageCount++;
-        echo "\n📬 Message #{$messageCount} received:\n";
-        echo "   Topic: {$message->topic}\n";
-        echo "   Payload: {$message->payload}\n";
+        echo "\n📬 Message #$messageCount received:\n";
+        echo "   Topic: $message->topic\n";
+        echo "   Payload: $message->payload\n";
         echo "   QoS: {$message->qos->value}\n";
         echo '   Retain: '.($message->retain ? 'yes' : 'no')."\n";
         if ($message->dup) {
@@ -132,8 +132,8 @@ try {
         $client->loopOnce(1.0);
     }
 
-    echo "\n⏱️  Listening timeout ({$duration} seconds)\n";
-    echo "   Total messages received: {$messageCount}\n\n";
+    echo "\n⏱️  Listening timeout ($duration seconds)\n";
+    echo "   Total messages received: $messageCount\n\n";
 
     echo "👋 Disconnecting...\n";
     $client->disconnect();

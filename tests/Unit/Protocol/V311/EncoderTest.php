@@ -14,7 +14,7 @@ test('encodeConnect minimal contains MQTT protocol name and level 4', function (
     $result  = $encoder->encodeConnect($pkt);
 
     // Protocol name "MQTT" should appear in the packet
-    expect(str_contains($result, 'MQTT'))->toBe(true);
+    expect(str_contains($result, 'MQTT'))->toBeTrue();
 
     // Find protocol level byte (immediately after "MQTT")
     $mqttPos = strpos($result, 'MQTT');
@@ -68,8 +68,8 @@ test('encodeConnect with username and password', function (): void {
     expect($flagsByte & 0x40)->toBe(0x40);
 
     // Username and password should appear in the payload
-    expect(str_contains($result, 'myuser'))->toBe(true);
-    expect(str_contains($result, 'mypass'))->toBe(true);
+    expect(str_contains($result, 'myuser'))->toBeTrue()
+        ->and(str_contains($result, 'mypass'))->toBeTrue();
 });
 
 test('encodeConnect with will message', function (): void {
@@ -90,8 +90,8 @@ test('encodeConnect with will message', function (): void {
     expect($flagsByte & 0x04)->toBe(0x04);
 
     // Will topic and payload should appear in the packet
-    expect(str_contains($result, 'will/topic'))->toBe(true);
-    expect(str_contains($result, 'will-payload'))->toBe(true);
+    expect(str_contains($result, 'will/topic'))->toBeTrue()
+        ->and(str_contains($result, 'will-payload'))->toBeTrue();
 });
 
 test('encodeConnect with will QoS 2 and retain', function (): void {
@@ -127,12 +127,12 @@ test('encodePublish QoS 0', function (): void {
 
     // First byte: packet type 3 in upper nibble, QoS 0 means no QoS bits
     $firstByte = ord($result[0]);
-    expect($firstByte >> 4)->toBe(3); // PUBLISH type
-    expect(($firstByte >> 1) & 0x03)->toBe(0); // QoS 0
+    expect($firstByte >> 4)->toBe(3) // PUBLISH type
+        ->and(($firstByte >> 1) & 0x03)->toBe(0); // QoS 0
 
     // Topic and payload should be in the packet
-    expect(str_contains($result, 'test/topic'))->toBe(true);
-    expect(str_contains($result, 'hello'))->toBe(true);
+    expect(str_contains($result, 'test/topic'))->toBeTrue()
+        ->and(str_contains($result, 'hello'))->toBeTrue();
 });
 
 test('encodePublish QoS 1 with packetId', function (): void {
@@ -151,8 +151,8 @@ test('encodePublish QoS 1 with packetId', function (): void {
     // Packet ID 42 should be encoded as 2-byte big-endian after the topic
     // Topic is 2-byte length + "test/topic" (10 bytes) = 12 bytes in variable header
     // Then 2-byte packet ID
-    expect(str_contains($result, 'test/topic'))->toBe(true);
-    expect(str_contains($result, pack('n', 42)))->toBe(true);
+    expect(str_contains($result, 'test/topic'))->toBeTrue()
+        ->and(str_contains($result, pack('n', 42)))->toBeTrue();
 });
 
 test('encodePublish QoS 2 with packetId', function (): void {
@@ -168,7 +168,7 @@ test('encodePublish QoS 2 with packetId', function (): void {
     $firstByte = ord($result[0]);
     expect(($firstByte >> 1) & 0x03)->toBe(2); // QoS 2
 
-    expect(str_contains($result, pack('n', 1000)))->toBe(true);
+    expect(str_contains($result, pack('n', 1000)))->toBeTrue();
 });
 
 test('encodePublish throws LogicException for QoS greater than 0 without packetId', function (): void {
@@ -222,10 +222,10 @@ test('encodeSubscribe single filter', function (): void {
     expect($firstByte)->toBe((8 << 4) | 0x02);
 
     // Packet ID 1 in variable header
-    expect(str_contains($result, pack('n', 1)))->toBe(true);
+    expect(str_contains($result, pack('n', 1)))->toBeTrue();
 
     // Topic filter should appear in the packet
-    expect(str_contains($result, 'test/topic'))->toBe(true);
+    expect(str_contains($result, 'test/topic'))->toBeTrue();
 });
 
 test('encodeSubscribe multiple filters', function (): void {
@@ -237,9 +237,9 @@ test('encodeSubscribe multiple filters', function (): void {
     ];
     $result = $encoder->encodeSubscribe($filters, 10);
 
-    expect(str_contains($result, 'topic/a'))->toBe(true);
-    expect(str_contains($result, 'topic/b'))->toBe(true);
-    expect(str_contains($result, 'topic/c'))->toBe(true);
+    expect(str_contains($result, 'topic/a'))->toBeTrue()
+        ->and(str_contains($result, 'topic/b'))->toBeTrue()
+        ->and(str_contains($result, 'topic/c'))->toBeTrue();
 
     // Find each topic and verify the QoS byte after it
     $posA = strpos($result, 'topic/a');
@@ -261,7 +261,7 @@ test('encodeSubscribe skips empty filters', function (): void {
     $result = $encoder->encodeSubscribe($filters, 1);
 
     // Only the valid topic should be present
-    expect(str_contains($result, 'valid/topic'))->toBe(true);
+    expect(str_contains($result, 'valid/topic'))->toBeTrue();
 
     // The remaining length should reflect only one filter entry
     // Variable header: 2 bytes (packet ID)
@@ -301,25 +301,25 @@ test('encodeUnsubscribe single filter', function (): void {
     expect($firstByte)->toBe((10 << 4) | 0x02);
 
     // Packet ID
-    expect(str_contains($result, pack('n', 5)))->toBe(true);
+    expect(str_contains($result, pack('n', 5)))->toBeTrue();
 
     // Topic filter
-    expect(str_contains($result, 'test/topic'))->toBe(true);
+    expect(str_contains($result, 'test/topic'))->toBeTrue();
 });
 
 test('encodeUnsubscribe multiple filters', function (): void {
     $encoder = new Encoder();
     $result  = $encoder->encodeUnsubscribe(['topic/a', 'topic/b'], 7);
 
-    expect(str_contains($result, 'topic/a'))->toBe(true);
-    expect(str_contains($result, 'topic/b'))->toBe(true);
+    expect(str_contains($result, 'topic/a'))->toBeTrue()
+        ->and(str_contains($result, 'topic/b'))->toBeTrue();
 });
 
 test('encodeUnsubscribe skips empty filters', function (): void {
     $encoder = new Encoder();
     $result  = $encoder->encodeUnsubscribe(['', 'valid/topic'], 1);
 
-    expect(str_contains($result, 'valid/topic'))->toBe(true);
+    expect(str_contains($result, 'valid/topic'))->toBeTrue();
 
     // Remaining length: 2 (packet ID) + 2 (len) + 11 (valid/topic) = 15
     $remainingLength = ord($result[1]);

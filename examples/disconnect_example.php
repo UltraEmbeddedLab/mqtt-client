@@ -63,14 +63,14 @@ $client    = new Client($options, $transport);
 
 echo "🔌 Connecting to MQTT 3.1.1 broker...\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}-v3\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId-v3\n\n";
 
 try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused by broker (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused by broker (reason code: $result->reasonCode)");
     }
 
     echo "✅ Successfully connected to MQTT 3.1.1 broker\n";
@@ -142,7 +142,7 @@ try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused by broker (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused by broker (reason code: $result->reasonCode)");
     }
 
     echo "   ✅ Connected successfully\n\n";
@@ -194,7 +194,7 @@ try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused by broker (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused by broker (reason code: $result->reasonCode)");
     }
 
     echo "   ✅ Connected successfully\n\n";
@@ -248,7 +248,7 @@ try {
     $result      = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused by broker (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused by broker (reason code: $result->reasonCode)");
     }
 
     echo "   ✅ Connected successfully\n\n";

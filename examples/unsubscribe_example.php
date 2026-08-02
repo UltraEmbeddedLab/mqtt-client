@@ -63,14 +63,14 @@ $client    = new Client($options, $transport);
 
 echo "🔌 Connecting to MQTT 5.0 broker...\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}-v5\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId-v5\n\n";
 
 try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused by broker (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused by broker (reason code: $result->reasonCode)");
     }
 
     echo "✅ Successfully connected to MQTT 5.0 broker\n";
@@ -95,12 +95,12 @@ try {
     $subResult = $client->subscribeWith($filters);
 
     echo "\n   ✅ Subscription successful\n";
-    echo "   Packet ID: {$subResult->packetId}\n";
+    echo "   Packet ID: $subResult->packetId\n";
     echo "   Granted QoS codes:\n";
     foreach ($subResult->results as $idx => $code) {
-        $qosGranted  = $code <= 2 ? "QoS {$code}" : 'Failure (0x'.dechex($code).')';
+        $qosGranted  = $code <= 2 ? "QoS $code" : 'Failure (0x'.dechex($code).')';
         $topicFilter = $filters[$idx]['filter'] ?? 'unknown';
-        echo "      - {$topicFilter}: {$qosGranted}\n";
+        echo "      - $topicFilter: $qosGranted\n";
     }
 
     echo "\n";
@@ -118,7 +118,7 @@ try {
 
     echo "   Unsubscribing from:\n";
     foreach ($unsubTopics as $topic) {
-        echo "      - {$topic}\n";
+        echo "      - $topic\n";
     }
 
     // Note: Current unsubscribe() returns void, but we can inspect via logging
@@ -176,14 +176,14 @@ $client    = new Client($options, $transport);
 
 echo "🔌 Connecting to MQTT 3.1.1 broker...\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}-v3\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId-v3\n\n";
 
 try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused by broker (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused by broker (reason code: $result->reasonCode)");
     }
 
     echo "✅ Successfully connected to MQTT 3.1.1 broker\n";
@@ -207,12 +207,12 @@ try {
     $subResult = $client->subscribeWith($filters);
 
     echo "\n   ✅ Subscription successful\n";
-    echo "   Packet ID: {$subResult->packetId}\n";
+    echo "   Packet ID: $subResult->packetId\n";
     echo "   Granted QoS codes:\n";
     foreach ($subResult->results as $idx => $code) {
-        $qosGranted  = $code <= 2 ? "QoS {$code}" : 'Failure (0x80)';
+        $qosGranted  = $code <= 2 ? "QoS $code" : 'Failure (0x80)';
         $topicFilter = $filters[$idx]['filter'] ?? 'unknown';
-        echo "      - {$topicFilter}: {$qosGranted}\n";
+        echo "      - $topicFilter: $qosGranted\n";
     }
 
     echo "\n";
@@ -229,7 +229,7 @@ try {
 
     echo "   Unsubscribing from:\n";
     foreach ($unsubTopics as $topic) {
-        echo "      - {$topic}\n";
+        echo "      - $topic\n";
     }
 
     $client->unsubscribe($unsubTopics);

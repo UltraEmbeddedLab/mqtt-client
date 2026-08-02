@@ -50,7 +50,6 @@ use function array_any;
 use function array_key_exists;
 use function array_key_first;
 use function array_keys;
-use function array_shift;
 use function bin2hex;
 use function chr;
 use function chunk_split;
@@ -1360,7 +1359,7 @@ final class Client implements ClientInterface
     private function saveSession(string $clientId): void
     {
         $store = $this->sessionStore();
-        if (!$store instanceof \ScienceStories\Mqtt\Contract\SessionStoreInterface) {
+        if (! $store instanceof SessionStoreInterface) {
             return;
         }
 
@@ -1390,7 +1389,7 @@ final class Client implements ClientInterface
     private function restoreSession(string $clientId): void
     {
         $store = $this->sessionStore();
-        if (!$store instanceof \ScienceStories\Mqtt\Contract\SessionStoreInterface) {
+        if (! $store instanceof SessionStoreInterface) {
             return;
         }
 

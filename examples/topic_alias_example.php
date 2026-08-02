@@ -77,54 +77,47 @@ $client    = new Client($options, $transport);
 
 echo "Topic Alias Example (MQTT 5.0)\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}\n";
-echo "   Requested Topic Alias Max: {$options->topicAliasMaximum}\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId\n";
+echo "   Requested Topic Alias Max: $options->topicAliasMaximum\n\n";
 
 try {
     $result = $client->connect();
 
     if ($result->reasonCode !== 0) {
-        throw new RuntimeException("Connection refused (reason code: {$result->reasonCode})");
+        throw new RuntimeException("Connection refused (reason code: $result->reasonCode)");
     }
 
     echo "Connected to MQTT 5.0 broker\n";
     echo '   Session Present: '.($result->sessionPresent ? 'yes' : 'no')."\n";
 
-    // Check broker's topic alias maximum
-    $brokerMax = $result->connack->properties['topic_alias_maximum'] ?? 0;
-    echo "   Broker Topic Alias Maximum: {$brokerMax}\n\n";
+    // The broker's advertised maximum overrides whatever you requested.
+    // Note the property is $connAck, not $connack — the latter is undefined and would
+    // silently evaluate to null, making this check always report 0.
+    $brokerMax = $result->connAck?->getTopicAliasMaximum() ?? 0;
+    echo "   Broker Topic Alias Maximum: $brokerMax\n\n";
 
     if ($brokerMax === 0) {
         echo "Broker does not support topic aliases.\n";
-        echo "Topic aliases are disabled for this connection.\n\n";
+        echo "Publishes fall back to full topic strings automatically.\n\n";
     }
 
-    $aliasManager = $client->topicAliasManager;
-    if ($aliasManager === null) {
-        echo "Topic Alias Manager not initialized (broker may not support topic aliases).\n";
-    }
-
-    // Example: Publish multiple messages to the same topic
+    // Aliasing is automatic and internal: the client builds its own TopicAliasManager
+    // from the broker's limit and applies it to every publish. There is nothing to read
+    // from outside the client — see docs/topic-aliases.md to drive one yourself.
     echo "Publishing messages with topic aliases...\n\n";
 
     $topic = 'sensors/device1/temperature';
 
-    // First publish - establishes alias
-    echo "Message 1: Publishing to '{$topic}' (establishes alias)\n";
+    // First publish sends the full topic and establishes the alias.
+    echo "Message 1: Publishing to '$topic' (establishes the alias)\n";
     $client->publish($topic, '22.5', new PublishOptions(qos: QoS::AtMostOnce));
-
-    if ($aliasManager !== null) {
-        $alias = $aliasManager->getAlias($topic);
-        echo '   Alias assigned: '.($alias ?? 'none')."\n";
-        echo "   Total aliases used: {$aliasManager->getAliasCount()}/{$aliasManager->maxAliases}\n\n";
-    }
 
     // Subsequent publishes - reuse alias (topic can be omitted internally)
     for ($i = 2; $i <= 5; $i++) {
         $payload = (20 + $i * 0.5).'';
-        echo "Message {$i}: Publishing to '{$topic}' (reuses alias)\n";
-        echo "   Payload: {$payload}\n";
+        echo "Message $i: Publishing to '$topic' (reuses alias)\n";
+        echo "   Payload: $payload\n";
         $client->publish($topic, $payload, new PublishOptions(qos: QoS::AtMostOnce));
     }
 
@@ -139,19 +132,13 @@ try {
 
     echo "Publishing to different topics...\n\n";
     foreach ($topics as $t) {
-        echo "Publishing to '{$t}'\n";
+        echo "Publishing to '$t'\n";
         $client->publish($t, '42.0', new PublishOptions(qos: QoS::AtMostOnce));
-
-        if ($aliasManager !== null) {
-            echo '   Alias: '.($aliasManager->getAlias($t) ?? 'none')."\n";
-        }
     }
 
-    if ($aliasManager !== null) {
-        echo "\nFinal alias status:\n";
-        echo "   Total aliases used: {$aliasManager->getAliasCount()}/{$aliasManager->maxAliases}\n";
-        echo '   Available slots: '.($aliasManager->hasAvailableSlots() ? 'yes' : 'no')."\n";
-    }
+    echo "\nEach distinct topic consumed one alias slot, up to the broker's limit of ";
+    echo "$brokerMax.\n";
+    echo "Beyond that, further topics keep sending their full string.\n";
 
     echo "\nSummary:\n";
     echo "   Topic aliases reduce bandwidth by replacing topic strings with 2-byte integers\n";

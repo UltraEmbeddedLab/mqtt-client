@@ -56,22 +56,22 @@ $client    = new Client($options, $transport);
 
 echo "🔌 Connecting to MQTT 5.0 broker...\n";
 echo "   Host: {$config['host']}\n";
-echo "   Port: {$options->port}\n";
-echo "   Client ID: {$clientId}\n\n";
+echo "   Port: $options->port\n";
+echo "   Client ID: $clientId\n\n";
 
 try {
     $result = $client->connect();
 
     echo "✅ Successfully connected to MQTT 5.0 broker\n\n";
     echo "📥 CONNACK Response from broker:\n";
-    echo "   Protocol: {$result->protocol} {$result->version}\n";
+    echo "   Protocol: $result->protocol $result->version\n";
     echo '   Session Present: '.($result->sessionPresent ? 'yes' : 'no')."\n";
-    echo "   Reason Code: {$result->reasonCode}";
+    echo "   Reason Code: $result->reasonCode";
 
     // Use ConnAck's enhanced functionality to decode reason code
     if ($result->connAck !== null) {
         $description = $result->connAck->getReasonDescription($result->version);
-        echo " ({$description})\n";
+        echo " ($description)\n";
         echo '   Connection Status: '.($result->connAck->isSuccess() ? '✅ Success' : '❌ Failed')."\n";
 
         // Display MQTT 5.0 specific properties if available
@@ -134,7 +134,7 @@ try {
             if (count($userProps) > 0) {
                 echo "   User Properties:\n";
                 foreach ($userProps as $key => $value) {
-                    echo "      {$key}: {$value}\n";
+                    echo "      $key: $value\n";
                 }
             }
         }
@@ -143,7 +143,7 @@ try {
     }
 
     if ($result->assignedClientId !== null) {
-        echo "   Assigned Client ID: {$result->assignedClientId}\n";
+        echo "   Assigned Client ID: $result->assignedClientId\n";
     }
 
     echo "\n👋 Disconnecting...\n";

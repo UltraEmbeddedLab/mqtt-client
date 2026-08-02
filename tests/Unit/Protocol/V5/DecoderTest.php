@@ -49,8 +49,7 @@ test('decodeConnAck with properties', function (): void {
 
     // Build properties: topic_alias_maximum (0x22) = 100, receive_maximum (0x21) = 50,
     // assigned_client_identifier (0x12) = "server-id"
-    $props = '';
-    $props .= chr(0x22) . pack('n', 100);           // topic_alias_maximum
+    $props = chr(0x22) . pack('n', 100);            // topic_alias_maximum
     $props .= chr(0x21) . pack('n', 50);             // receive_maximum
     $props .= chr(0x12) . Bytes::encodeString('server-id'); // assigned_client_identifier
 
@@ -152,8 +151,7 @@ test('decodePublish with properties', function (): void {
     $decoder = new Decoder();
 
     // Build properties: content_type (0x03), user_property (0x26), topic_alias (0x23)
-    $props = '';
-    $props .= chr(0x03) . Bytes::encodeString('application/json');  // content_type
+    $props = chr(0x03) . Bytes::encodeString('application/json');   // content_type
     $props .= chr(0x26) . Bytes::encodeString('key1') . Bytes::encodeString('val1'); // user_property
     $props .= chr(0x23) . pack('n', 7);  // topic_alias
 
