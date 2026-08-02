@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — the client can now hold a connection open
+
+Four defects that only show up on a long-lived connection, which is what this library is for.
+
+- **Keep Alive was driven by inbound traffic.** `touchActivity()` ran after every read and the ping timer measured from it, but MQTT-3.1.2-23 obliges the *client* to send within the window — receiving does not count. A subscriber on a busy topic therefore never sent PINGREQ and was dropped by the broker every 1.5×keepAlive, then flapped forever. The clock is now split: `$lastSent` (updated in `trackWrite()`, so every outbound packet counts) drives the ping; `$lastReceived` is kept for liveness only.
+- **A single lost PINGRESP disabled keepalive for the life of the process.** The outstanding-ping flag was set on send and cleared only on receipt, with no deadline — so after one unanswered PINGREQ the client sat on a dead socket that still reported `isOpen()`, receiving nothing, with auto-reconnect never firing because the transport looked healthy. This is the classic NAT-eviction / black-holed-broker failure. There is now a deadline (`Options::withPingResponseTimeout()`, default 10s). It is evaluated only after a poll that found the socket **silent**, never on elapsed wall time alone — judging it on the clock would tear down a healthy connection whenever the caller's loop interval exceeds the timeout, which is ordinary for a worker polling every 30s or a handler that blocks on a database write. Two silent polls are required, so one slow iteration cannot condemn a live link, and any inbound packet clears the ping since it proves the link is alive even if the PINGRESP itself was lost. On expiry the client dispatches `Events\ServerDisconnect`, closes the transport, and — when `autoReconnect` is off, which is the default — stops `run()`/`messages()` rather than spinning on a closed socket.
+- **`server_keep_alive` from CONNACK was decoded and ignored**, violating MQTT-3.2.2-22. Requesting 300s against a broker that grants 60s produced an endless 90-second connect/drop loop. The granted value is now what the client pings on, and the override is logged.
+- **Every deadline used wall-clock `microtime()`.** An NTP step of +45s expired all of them at once: an in-flight QoS 1 publish "timed out", resent with DUP, exhausted its retries and threw for a message the broker had already acknowledged. A backward step stalled keepalive past the broker's window. All 36 sites across the client, flow control, rate limiter and both transports now read `Util\Clock::now()`, which is monotonic `hrtime()`. `time()` is deliberately kept for `SessionState::$savedAt`, where wall-clock is the correct meaning.
+- **Flow control leaked a slot on every failed publish.** The QoS 1/2 wait released its slot only via PUBACK/PUBCOMP, so a timeout kept it forever. With `receive_maximum = 10`, ten timeouts during a GC pause permanently exhausted the window and every later QoS 1/2 publish threw "timed out waiting for slot" until the process restarted. The slot is now reclaimed by a sweep in `loopOnce()` — deliberately not the instant `publish()` gives up, because MQTT-4.9.0-1 counts an unacknowledged message against Receive Maximum until the broker acknowledges it, and freeing it early would let the client exceed the window the broker granted. The sweep waits out the full resend budget, doubled.
+
+### Added
+
+- `Options::withPingResponseTimeout()` and `Options::$pingResponseTimeout` (default 10.0s).
+- `Util\Clock` — the monotonic time source the whole library now reads.
+
 ## [2.0.0] - 2026-08-02
 
 Two things happened at once: the package was renamed, and a set of defects were fixed in

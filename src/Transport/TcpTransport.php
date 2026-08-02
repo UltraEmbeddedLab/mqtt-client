@@ -7,6 +7,7 @@ namespace ScienceStories\Mqtt\Transport;
 use ScienceStories\Mqtt\Contract\TransportInterface;
 use ScienceStories\Mqtt\Exception\Timeout;
 use ScienceStories\Mqtt\Exception\TransportError;
+use ScienceStories\Mqtt\Util\Clock;
 
 use function is_int;
 use function is_resource;
@@ -106,7 +107,7 @@ final class TcpTransport implements TransportInterface
         }
 
         $data     = '';
-        $deadline = $timeoutSec !== null ? (microtime(true) + $timeoutSec) : null;
+        $deadline = $timeoutSec !== null ? (Clock::now() + $timeoutSec) : null;
 
         while (strlen($data) < $length) {
             $remaining = $length - strlen($data);
@@ -116,7 +117,7 @@ final class TcpTransport implements TransportInterface
 
             // Handle timeout via stream_select when a timeout is provided
             if ($deadline !== null) {
-                $now      = microtime(true);
+                $now      = Clock::now();
                 $timeLeft = $deadline - $now;
                 if ($timeLeft <= 0) {
                     throw new Timeout('Read timed out');

@@ -8,9 +8,9 @@ use Random\RandomException;
 use ScienceStories\Mqtt\Contract\ClientInterface;
 use ScienceStories\Mqtt\Exception\Timeout;
 use ScienceStories\Mqtt\Protocol\QoS;
+use ScienceStories\Mqtt\Util\Clock;
 
 use function bin2hex;
-use function microtime;
 use function random_bytes;
 
 /**
@@ -75,9 +75,9 @@ final class RequestResponse
         ));
 
         // Wait for correlated response
-        $deadline = microtime(true) + $timeoutSec;
+        $deadline = Clock::now() + $timeoutSec;
         while (true) {
-            $remaining = $deadline - microtime(true);
+            $remaining = $deadline - Clock::now();
             if ($remaining <= 0) {
                 throw new Timeout("Request/Response timed out waiting for response on '$this->responseTopic' with correlation '$correlationData'");
             }

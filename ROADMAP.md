@@ -5,23 +5,25 @@ version are wanted but unscheduled. This is a statement of intent, not a promise
 
 Everything here is open to contribution — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## 2.1 — correctness on long-lived connections
+## 2.1 — correctness on long-lived connections ✅ done, unreleased
 
-The client's weakest area is holding a connection open for days rather than minutes.
+All five landed; see the `[Unreleased]` section of the CHANGELOG.
 
-- **Keepalive driven by outbound traffic.** Today the keepalive timer is reset by *received*
-  packets, so a busy subscriber never sends PINGREQ and is dropped by the broker at
-  1.5×keepAlive. MQTT-3.1.2-23 requires the client to *send* within the window.
-- **Detect a missing PINGRESP.** The outstanding-ping flag is set on send and cleared only
-  on receipt, with no deadline — so one lost PINGRESP disables keepalive for the life of the
-  process and the client sits on a dead socket indefinitely. This is the most common IoT
-  field failure.
-- **Honour `server_keep_alive`.** The value is decoded from CONNACK and ignored. A broker
-  that overrides your keepalive currently disconnects you on a schedule you cannot see.
-- **A monotonic clock.** Every deadline uses wall-clock `microtime()`, so an NTP step
-  expires all of them at once.
-- **Release the flow-control slot on a failed publish.** The quota leaks on every timeout
-  and never recovers; after `receiveMaximum` failures every QoS 1/2 publish throws.
+- ~~Keepalive driven by outbound traffic~~ — `$lastSent` vs `$lastReceived`
+- ~~Detect a missing PINGRESP~~ — `Options::withPingResponseTimeout()`, default 10s
+- ~~Honour `server_keep_alive`~~ — the granted value is what the client pings on
+- ~~A monotonic clock~~ — `Util\Clock::now()` over `hrtime()`, everywhere
+- ~~Release the flow-control slot on a failed publish~~ — `awaitPublishAck()` + try/finally
+
+Still open in this area, and the biggest remaining structural item:
+
+- **A read buffer** (`Protocol\PacketReader`). A frame is read in three or more separate
+  socket calls with no buffer behind them, each restarting the timeout, so a mid-frame
+  timeout desynchronises the stream permanently and every later frame boundary is wrong.
+  This is also the prerequisite for the async work below.
+- **`tick()` cannot read a byte.** `loopOnce(0.0)` reaches `readExact(n, 0.0)`, whose
+  deadline has already expired before `stream_select()` is called. The documented
+  non-blocking integration path silently delivers nothing.
 
 ## 2.2 — acknowledgement semantics
 

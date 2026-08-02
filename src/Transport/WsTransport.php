@@ -10,6 +10,7 @@ use ScienceStories\Mqtt\Contract\TransportInterface;
 use ScienceStories\Mqtt\Exception\ProtocolError;
 use ScienceStories\Mqtt\Exception\Timeout;
 use ScienceStories\Mqtt\Exception\TransportError;
+use ScienceStories\Mqtt\Util\Clock;
 use Throwable;
 
 use function base64_encode;
@@ -22,7 +23,6 @@ use function fread;
 use function fwrite;
 use function is_resource;
 use function max;
-use function microtime;
 use function ord;
 use function pack;
 use function random_bytes;
@@ -158,12 +158,12 @@ final class WsTransport implements TransportInterface
             throw new TransportError('WebSocket: Cannot read: transport is not open');
         }
 
-        $deadline = $timeoutSec !== null ? (microtime(true) + $timeoutSec) : null;
+        $deadline = $timeoutSec !== null ? (Clock::now() + $timeoutSec) : null;
 
         // Drain from mqttBuffer first
         while (strlen($this->mqttBuffer) < $length) {
             if ($deadline !== null) {
-                $timeLeft = $deadline - microtime(true);
+                $timeLeft = $deadline - Clock::now();
                 if ($timeLeft <= 0) {
                     throw new Timeout('WebSocket: Read timed out');
                 }
@@ -246,9 +246,9 @@ final class WsTransport implements TransportInterface
 
         // Read HTTP response
         $response = '';
-        $deadline = microtime(true) + 5.0;
+        $deadline = Clock::now() + 5.0;
         while (!str_contains($response, "\r\n\r\n")) {
-            if (microtime(true) > $deadline) {
+            if (Clock::now() > $deadline) {
                 throw new TransportError('WebSocket: Handshake timed out');
             }
             $chunk = $this->rawRead(1, $deadline);
@@ -326,7 +326,7 @@ final class WsTransport implements TransportInterface
 
         // Wait for data
         if ($deadline !== null) {
-            $timeLeft = $deadline - microtime(true);
+            $timeLeft = $deadline - Clock::now();
             if ($timeLeft <= 0) {
                 throw new Timeout('WebSocket: Read timed out');
             }
@@ -448,7 +448,7 @@ final class WsTransport implements TransportInterface
 
         $data = '';
         while (strlen($data) < $length) {
-            if ($deadline !== null && microtime(true) > $deadline) {
+            if ($deadline !== null && Clock::now() > $deadline) {
                 throw new Timeout('WebSocket: Read timed out');
             }
 

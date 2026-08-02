@@ -171,7 +171,8 @@ $client->disconnect();
 | `port`              | int         | `1883`    | Broker port. **Not** derived from TLS — pass `8883` yourself. (`Easy\Mqtt::publish()` auto-detects; `Options` does not.) |
 | `version`           | MqttVersion | V3_1_1    | MQTT protocol version                                   |
 | `clientId`          | string      | `''`      | Client identifier. Empty means the broker assigns one, which MQTT 3.1.1 allows only with `cleanSession: true`. `Easy\Mqtt` generates one for you. |
-| `keepAlive`         | int         | 60        | Keep alive interval in seconds (0–65535)                |
+| `keepAlive`         | int         | 60        | Keep alive interval in seconds (0–65535). A broker that sends Server Keep Alive in CONNACK overrides this. |
+| `pingResponseTimeout` | float     | 10.0      | How long to wait for a PINGRESP before treating the connection as dead and closing it |
 | `cleanSession`      | bool        | true      | Start with clean session                                |
 | `username`          | string      | null      | Authentication username                                 |
 | `password`          | string      | null      | Authentication password                                 |

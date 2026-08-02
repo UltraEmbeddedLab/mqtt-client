@@ -28,6 +28,7 @@ use ScienceStories\Mqtt\Exception\TransportError;
 use ScienceStories\Mqtt\Protocol\MqttVersion;
 use ScienceStories\Mqtt\Protocol\Packet\ConnAck;
 use ScienceStories\Mqtt\Protocol\Packet\Connect as ConnectPacket;
+use ScienceStories\Mqtt\Protocol\Packet\Disconnect;
 use ScienceStories\Mqtt\Protocol\Packet\PacketType;
 use ScienceStories\Mqtt\Protocol\Packet\PubAck;
 use ScienceStories\Mqtt\Protocol\Packet\PubComp;
@@ -41,6 +42,7 @@ use ScienceStories\Mqtt\Protocol\V5\Decoder as V5Decoder;
 use ScienceStories\Mqtt\Protocol\V5\Encoder as V5Encoder;
 use ScienceStories\Mqtt\Session\SessionState;
 use ScienceStories\Mqtt\Util\Bytes;
+use ScienceStories\Mqtt\Util\Clock;
 use ScienceStories\Mqtt\Util\RandomId;
 use ScienceStories\Mqtt\Util\TopicValidator;
 use SplQueue;
@@ -60,7 +62,6 @@ use function is_array;
 use function is_int;
 use function is_string;
 use function max;
-use function microtime;
 use function mt_getrandmax;
 use function mt_rand;
 use function ord;
@@ -77,6 +78,14 @@ use function usleep;
  */
 final class Client implements ClientInterface
 {
+    /**
+     * Silent polls required before an unanswered PINGREQ condemns the connection.
+     *
+     * More than one, so a single long-blocking iteration — a handler waiting on a database,
+     * a GC pause — cannot tear down a healthy link on its own.
+     */
+    private const int MIN_SILENT_POLLS = 2;
+
     private EncoderInterface $encoder;
 
     private DecoderInterface $decoder;
@@ -93,9 +102,29 @@ final class Client implements ClientInterface
 
     private ?UnsubAck $lastUnsubAck = null;
 
-    private float $lastActivity;
+    /** Monotonic seconds at the last packet we sent — this drives Keep Alive. */
+    private float $lastSent;
 
-    private bool $pingOutstanding = false;
+    /** Monotonic seconds at the last packet we received — liveness only, not Keep Alive. */
+    private float $lastReceived;
+
+    /**
+     * Monotonic seconds at the outstanding PINGREQ, or null when none is in flight.
+     *
+     * One field rather than a boolean plus a timestamp: the pair could disagree — a caller
+     * that set the flag without the time left the deadline comparing against a sentinel —
+     * and this makes that state unrepresentable.
+     */
+    private ?float $pingSentAt = null;
+
+    /** Consecutive polls that found the socket silent while a PINGREQ was outstanding. */
+    private int $silentPolls = 0;
+
+    /**
+     * Keep Alive actually in force: the broker's Server Keep Alive when it sends one
+     * (MQTT-3.2.2-22 makes honouring it mandatory), otherwise the configured value.
+     */
+    private int $effectiveKeepAlive;
 
     private ?PubAck $lastPubAck = null;
 
@@ -143,20 +172,35 @@ final class Client implements ClientInterface
     {
         $written = $this->transport->write($bytes);
         $this->bytesSent += $written;
-
+        // Every outbound packet resets the Keep Alive window — that is the whole point of
+        // measuring it here rather than at individual call sites, which is how the old
+        // code came to measure inbound traffic instead.
+        $this->touchSent();
     }
 
     private function trackRead(int $length, ?float $timeoutSec = null): string
     {
         $data = $this->transport->readExact($length, $timeoutSec);
         $this->bytesReceived += strlen($data);
+        // Bytes from the peer are the only proof the link is alive. Recording it here
+        // rather than at call sites is what keeps that true: the previous single
+        // "activity" clock was touched after writes too, so our own outbound packets
+        // masqueraded as evidence the broker was still there.
+        $this->touchReceived();
 
         return $data;
     }
 
-    private function touchActivity(): void
+    /** Record that we sent something — this is what the Keep Alive window measures. */
+    private function touchSent(): void
     {
-        $this->lastActivity = microtime(true);
+        $this->lastSent = Clock::now();
+    }
+
+    /** Record that the peer said something. Used for liveness, never for Keep Alive. */
+    private function touchReceived(): void
+    {
+        $this->lastReceived = Clock::now();
     }
 
     private function dispatch(object $event): void
@@ -172,22 +216,99 @@ final class Client implements ClientInterface
         $pkt = chr(PacketType::PINGREQ->value << 4) . chr(0);
         $this->logger->debug('>> PINGREQ (auto)');
         $this->trackWrite($pkt);
-        $this->pingOutstanding = true;
-        $this->touchActivity();
+        $this->pingSentAt  = Clock::now();
+        $this->silentPolls = 0;
     }
 
+    /**
+     * Send a PINGREQ when the Keep Alive window is nearly up.
+     *
+     * The window is measured from the last packet we **sent**. MQTT-3.1.2-23 obliges the
+     * client to send within it; receiving does not count. Measuring inbound traffic — which
+     * the single "activity" clock used to do — means a busy subscriber never pings and is
+     * dropped by the broker every 1.5x Keep Alive.
+     */
     private function maybeAutoPing(): void
     {
-        $keep = $this->options->keepAlive;
+        if (! $this->transport->isOpen() || $this->pingSentAt !== null) {
+            return;
+        }
+
+        $keep = $this->effectiveKeepAlive;
         if ($keep <= 0) {
             return;
         }
-        $now     = microtime(true);
-        $elapsed = $now - $this->lastActivity;
-        // Guard threshold: send it slightly before keepAlive expires (e.g., 90% of interval) to be safe
+
+        // Ping slightly before the window closes rather than exactly on it.
         $threshold = max(1.0, $keep * 0.9);
-        if ($elapsed >= $threshold && ! $this->pingOutstanding && $this->transport->isOpen()) {
+        if (Clock::now() - $this->lastSent >= $threshold) {
             $this->sendPingReq();
+        }
+    }
+
+    /**
+     * Decide whether an unanswered PINGREQ means the connection is dead.
+     *
+     * Called only after a poll that found the socket silent — never on wall-clock alone.
+     * That distinction matters: judging "time since the ping" would tear down a perfectly
+     * healthy connection whenever the caller's loop interval exceeds the timeout, which is
+     * ordinary for a worker polling every 30s or a handler that blocks on a database write.
+     * The question is "did we listen and hear nothing", not "how long has it been".
+     *
+     * Without any deadline at all the outstanding ping latches, keepalive stops for the
+     * life of the process, and the client sits on a dead socket that still reports
+     * isOpen() — so auto-reconnect never fires either. That is the classic NAT-eviction /
+     * black-holed-broker failure.
+     */
+    private function expirePingIfSilent(): void
+    {
+        if ($this->pingSentAt === null || ! $this->transport->isOpen()) {
+            return;
+        }
+
+        // Any inbound packet proves the link is alive, even if the PINGRESP itself was lost
+        // or reordered.
+        if ($this->lastReceived > $this->pingSentAt) {
+            $this->pingSentAt  = null;
+            $this->silentPolls = 0;
+
+            return;
+        }
+
+        $this->silentPolls++;
+
+        $waited = Clock::now() - $this->pingSentAt;
+        // Require both a real elapsed timeout and more than one silent poll, so a single
+        // long-blocking iteration cannot condemn the connection on its own.
+        if ($waited < $this->options->pingResponseTimeout || $this->silentPolls < self::MIN_SILENT_POLLS) {
+            return;
+        }
+
+        $this->logger->warning('No PINGRESP within the deadline; treating the connection as dead', [
+            'waitedSeconds' => round($waited, 3),
+            'timeout'       => $this->options->pingResponseTimeout,
+            'silentPolls'   => $this->silentPolls,
+        ]);
+        if ($this->metrics instanceof MetricsInterface) {
+            $this->metrics->increment('ping_timeouts');
+        }
+
+        // Tell the application before tearing anything down. The inbound-DISCONNECT branch
+        // does the same; a connection dying silently is how a supervisor ends up watching a
+        // live process that will never deliver another message.
+        $willReconnect = $this->options->autoReconnect;
+        $this->dispatch(new EvServerDisconnect(
+            new Disconnect(ReasonCode::KeepAliveTimeout->value),
+            $willReconnect,
+        ));
+
+        $this->transport->close();
+        $this->resetConnectionState();
+
+        if (! $willReconnect) {
+            // Nothing will re-establish this connection, so stop run()/messages() rather
+            // than spinning on a closed transport forever.
+            $this->shouldStop = true;
         }
     }
 
@@ -206,12 +327,15 @@ final class Client implements ClientInterface
         if ($this->options->offlineQueueSize > 0) {
             $this->offlineQueue = new OfflineQueue($this->options->offlineQueueSize);
         }
-        $this->touchActivity();
+        $this->effectiveKeepAlive = $this->options->keepAlive;
+        // Start both clocks so nothing reads an unset timestamp before connect().
+        $this->touchSent();
+        $this->touchReceived();
     }
 
     public function connect(): ConnectResult
     {
-        $connectStart = microtime(true);
+        $connectStart = Clock::now();
         // Nothing from a previous connection may leak into this one: Packet Identifiers,
         // topic aliases and flow-control quota are all connection-scoped.
         $this->resetConnectionState();
@@ -271,12 +395,10 @@ final class Client implements ClientInterface
         $data = $this->encoder->encodeConnect($connect);
         $this->logger->debug('>> CONNECT', ['bytes' => strlen($data), 'preview' => $this->hexPreview($data)]);
         $this->trackWrite($data);
-        $this->touchActivity();
 
         // Read the fixed header: 1 byte type, then varint remaining length (1-4 bytes)
         $this->logger->debug('<< waiting for CONNACK');
-        $typeByte = $this->trackRead(1, 5.0);
-        $this->touchActivity();
+        $typeByte   = $this->trackRead(1, 5.0);
         $packetType = ord($typeByte[0]) >> 4;
         if ($packetType !== PacketType::CONNACK->value) {
             throw new ProtocolError("Expected CONNACK, got type $packetType");
@@ -306,7 +428,6 @@ final class Client implements ClientInterface
         }
 
         $body = $this->trackRead($remainingLen, 5.0);
-        $this->touchActivity();
         $this->logger->debug('<< CONNACK', ['bytes' => $remainingLen, 'preview' => $this->hexPreview($typeByte.$varBytes.$body)]);
         $connack = $this->decoder->decodeConnAck($body);
 
@@ -323,6 +444,19 @@ final class Client implements ClientInterface
             $this->logger->warning('CONNECT refused', ['reasonCode' => $connack->returnCode, 'error' => $exception->getMessage()]);
 
             throw $exception;
+        }
+
+        // MQTT-3.2.2-22: when the broker sends a Server Keep Alive, the client MUST use it
+        // instead of the value it asked for. Ignoring it means pinging on a schedule the
+        // broker has already rejected — e.g. asking for 300s against a broker that grants
+        // 60s produces an endless 90-second connect/drop loop.
+        $serverKeepAlive          = $connack->getServerKeepAlive();
+        $this->effectiveKeepAlive = $serverKeepAlive ?? $this->options->keepAlive;
+        if ($serverKeepAlive !== null && $serverKeepAlive !== $this->options->keepAlive) {
+            $this->logger->info('Broker overrode Keep Alive', [
+                'requested' => $this->options->keepAlive,
+                'granted'   => $serverKeepAlive,
+            ]);
         }
 
         // Inbound QoS 2 messages awaiting PUBREL are Session state. Discard them only
@@ -362,7 +496,7 @@ final class Client implements ClientInterface
 
         if ($this->metrics instanceof MetricsInterface) {
             $this->metrics->increment('connections', 1.0, ['version' => $versionStr]);
-            $this->metrics->observe('connect_duration_seconds', microtime(true) - $connectStart);
+            $this->metrics->observe('connect_duration_seconds', Clock::now() - $connectStart);
         }
 
         // Drain offline queue after successful connect
@@ -429,13 +563,16 @@ final class Client implements ClientInterface
         if ($this->flowControl instanceof FlowControl) {
             $this->flowControl->reset();
         }
-        $this->qos1Seen        = [];
-        $this->pingOutstanding = false;
-        $this->lastSubAck      = null;
-        $this->lastUnsubAck    = null;
-        $this->lastPubAck      = null;
-        $this->lastPubComp     = null;
-        $this->touchActivity();
+        $this->qos1Seen     = [];
+        $this->pingSentAt   = null;
+        $this->silentPolls  = 0;
+        $this->lastSubAck   = null;
+        $this->lastUnsubAck = null;
+        $this->lastPubAck   = null;
+        $this->lastPubComp  = null;
+        // Start both clocks now, so a fresh connection is not immediately "overdue".
+        $this->touchSent();
+        $this->touchReceived();
     }
 
     /**
@@ -536,10 +673,10 @@ final class Client implements ClientInterface
                     'max'      => $this->flowControl->maxInFlight,
                 ]);
                 // Poll loopOnce to process incoming ACKs while waiting
-                $deadline = microtime(true) + 5.0;
+                $deadline = Clock::now() + 5.0;
                 // @phpstan-ignore-next-line booleanNot.alwaysTrue - canSend() state changes via loopOnce()
                 while (! $this->flowControl->canSend()) {
-                    $timeLeft = $deadline - microtime(true);
+                    $timeLeft = $deadline - Clock::now();
                     if ($timeLeft <= 0) {
                         throw new Timeout('Flow control: timed out waiting for slot');
                     }
@@ -601,19 +738,66 @@ final class Client implements ClientInterface
             $this->metrics->increment('publish_sent', 1.0, ['qos' => $qos]);
             $this->metrics->size('publish_payload_bytes', strlen($payload), ['qos' => $qos]);
         }
-        $this->touchActivity();
 
+        return $this->awaitPublishAck($qos, (int) $packetId, $publishTopic, $payload, $options, $publishProps);
+    }
+
+    /**
+     * Return flow-control quota held by messages the broker will plainly never acknowledge.
+     *
+     * The slot for an in-flight PUBLISH belongs to the broker until it acknowledges, so it
+     * must NOT be released the moment `publish()` gives up waiting: MQTT-4.9.0-1 counts the
+     * message against Receive Maximum while it is still unacknowledged, and freeing it
+     * early lets the client exceed the window the broker granted.
+     *
+     * But holding it forever is the leak this sweep exists to prevent — a handful of
+     * timeouts against a broker advertising `receive_maximum: 1` would otherwise exhaust
+     * the quota for the life of the process. So entries are reclaimed only well past the
+     * point where an acknowledgement could still plausibly arrive: the full resend budget,
+     * doubled.
+     */
+    private function sweepStalledFlowControlSlots(): void
+    {
+        if (! $this->flowControl instanceof FlowControl) {
+            return;
+        }
+
+        $resendBudget = $this->options->ackTimeout * ($this->options->maxResendAttempts + 1);
+        $grace        = max(1.0, $resendBudget * 2);
+
+        foreach ($this->flowControl->getTimedOutPackets($grace) as $packetId) {
+            $this->logger->warning('Reclaiming flow-control slot for an unacknowledged packet', [
+                'packetId'     => $packetId,
+                'graceSeconds' => round($grace, 3),
+            ]);
+            $this->flowControl->trackAck($packetId);
+            if ($this->metrics instanceof MetricsInterface) {
+                $this->metrics->increment('flow_control_slots_reclaimed');
+            }
+        }
+    }
+
+    /**
+     * Block until the broker acknowledges a QoS 1/2 publish, resending with DUP on timeout.
+     *
+     * @param  array<string, mixed>|null  $publishProps
+     * @return int The packet identifier, or 0 for QoS 0
+     *
+     * @throws Timeout if the acknowledgement never arrives within the resend budget
+     */
+    private function awaitPublishAck(int $qos, int $packetId, string $publishTopic, string $payload, PublishOptions $options, ?array $publishProps): int
+    {
         switch ($qos) {
             case 0:
                 return 0;
             case 1:
-                $pid         = (int) $packetId;
+                $pid         = $packetId;
                 $ackTimeout  = $this->options->ackTimeout;
                 $maxResends  = $this->options->maxResendAttempts;
                 $resendCount = 0;
-                $deadline    = microtime(true) + $ackTimeout;
+                $deadline    = Clock::now() + $ackTimeout;
                 while (true) {
-                    $timeLeft = $deadline - microtime(true);
+                    $timeLeft = $deadline - Clock::now();
                     if ($timeLeft <= 0) {
                         if ($resendCount >= $maxResends) {
                             throw new Timeout("Timed out waiting for PUBACK after $resendCount resend(s)");
@@ -632,7 +816,7 @@ final class Client implements ClientInterface
                         $this->logger->debug('>> PUBLISH (resend)', ['packetId' => $pid, 'attempt' => $resendCount + 1]);
                         $this->trackWrite($resendData);
                         $resendCount++;
-                        $deadline = microtime(true) + $ackTimeout;
+                        $deadline = Clock::now() + $ackTimeout;
 
                         continue;
                     }
@@ -650,14 +834,14 @@ final class Client implements ClientInterface
                 }
                 // no break
             case 2:
-                $pid               = (int) $packetId;
+                $pid               = $packetId;
                 $ackTimeout2       = $this->options->ackTimeout;
                 $maxResends2       = $this->options->maxResendAttempts;
                 $resendCount2      = 0;
-                $deadline          = microtime(true) + $ackTimeout2;
+                $deadline          = Clock::now() + $ackTimeout2;
                 $this->lastPubComp = null;
                 while (true) {
-                    $timeLeft = $deadline - microtime(true);
+                    $timeLeft = $deadline - Clock::now();
                     if ($timeLeft <= 0) {
                         if ($resendCount2 >= $maxResends2) {
                             throw new Timeout("Timed out waiting for QoS2 handshake after $resendCount2 resend(s)");
@@ -676,7 +860,7 @@ final class Client implements ClientInterface
                         $this->logger->debug('>> PUBLISH (QoS2 resend)', ['packetId' => $pid, 'attempt' => $resendCount2 + 1]);
                         $this->trackWrite($resendData2);
                         $resendCount2++;
-                        $deadline = microtime(true) + $ackTimeout2;
+                        $deadline = Clock::now() + $ackTimeout2;
 
                         continue;
                     }
@@ -695,7 +879,8 @@ final class Client implements ClientInterface
                 }
         }
 
-        return 0; // @phpstan-ignore-line unreachable: all cases handled or exceptions thrown above
+        // Unreachable: QoS 0 returns above, QoS 1/2 loop until acknowledged or throw.
+        return 0;
     }
 
     public function ping(?float $timeoutSec = 5.0): bool
@@ -705,16 +890,24 @@ final class Client implements ClientInterface
         }
         $pkt = chr(PacketType::PINGREQ->value << 4) . chr(0);
         $this->logger->debug('>> PINGREQ');
-        $this->trackWrite($pkt);
-        $this->pingOutstanding = true;
-        $this->touchActivity();
 
-        $hdr = $this->trackRead(2, $timeoutSec ?? 5.0);
-        $this->touchActivity();
+        try {
+            $this->trackWrite($pkt);
+            $this->pingSentAt = Clock::now();
+
+            $hdr = $this->trackRead(2, $timeoutSec ?? 5.0);
+        } finally {
+            // This call owns its own request/response round trip, so the outstanding-ping
+            // state must not survive it however it ends. Leaving it set would arm the
+            // auto-ping deadline against a ping this method already gave up on — a health
+            // check that manufactures the outage it exists to detect.
+            $this->pingSentAt  = null;
+            $this->silentPolls = 0;
+        }
+
         $type = (ord($hdr[0]) >> 4);
         $rl   = ord($hdr[1]);
         if ($type === PacketType::PINGRESP->value && $rl === 0) {
-            $this->pingOutstanding = false;
             $this->logger->info('PINGRESP OK');
             if ($this->metrics instanceof MetricsInterface) {
                 $this->metrics->increment('pings');
@@ -742,12 +935,11 @@ final class Client implements ClientInterface
         $data = $this->encoder->encodeSubscribe($filters, $pid, $options);
         $this->logger->debug('>> SUBSCRIBE', ['packetId' => $pid, 'filters' => $filters, 'bytes' => strlen($data), 'preview' => $this->hexPreview($data)]);
         $this->trackWrite($data);
-        $this->touchActivity();
 
         // Await SUBACK; handle interleaved PUBLISH if broker sends retained messages immediately.
-        $deadline = microtime(true) + 5.0;
+        $deadline = Clock::now() + 5.0;
         while (true) {
-            $timeLeft = $deadline - microtime(true);
+            $timeLeft = $deadline - Clock::now();
             if ($timeLeft <= 0) {
                 throw new Timeout('Timed out waiting for SUBACK');
             }
@@ -793,11 +985,10 @@ final class Client implements ClientInterface
         $data = $this->encoder->encodeUnsubscribe($filters, $pid);
         $this->logger->debug('>> UNSUBSCRIBE', ['packetId' => $pid, 'filters' => $filters, 'bytes' => strlen($data), 'preview' => $this->hexPreview($data)]);
         $this->trackWrite($data);
-        $this->touchActivity();
 
-        $deadline = microtime(true) + 5.0;
+        $deadline = Clock::now() + 5.0;
         while (true) {
-            $timeLeft = $deadline - microtime(true);
+            $timeLeft = $deadline - Clock::now();
             if ($timeLeft <= 0) {
                 throw new Timeout('Timed out waiting for UNSUBACK');
             }
@@ -834,11 +1025,18 @@ final class Client implements ClientInterface
             }
         }
 
-        // Before attempting to read, send an automatic PING if needed.
+        // Before attempting to read, send an automatic PING if needed and reclaim any
+        // flow-control quota held by messages the broker has long since abandoned.
         $this->maybeAutoPing();
+        $this->sweepStalledFlowControlSlots();
         try {
             $b0 = $this->trackRead(1, $timeoutSec);
         } catch (Timeout) {
+            // We listened and heard nothing. Only now may an outstanding PINGREQ count
+            // against its deadline — judging it before the read would condemn a healthy
+            // connection whenever the caller polls less often than the timeout.
+            $this->expirePingIfSilent();
+
             return false; // nothing available
         } catch (TransportError) {
             // Transport broke; attempt to reconnect next iteration
@@ -870,7 +1068,6 @@ final class Client implements ClientInterface
             return false;
         }
         $body = $this->trackRead($rl, $timeoutSec);
-        $this->touchActivity();
         // PSR-14: emit PacketReceived with full frame bytes
         $raw = $b0.$varBytes.$body;
         if ($this->metrics instanceof MetricsInterface) {
@@ -887,7 +1084,6 @@ final class Client implements ClientInterface
                     $puback = chr(PacketType::PUBACK->value << 4) . chr(2) . pack('n', $msg->packetId);
                     $this->logger->debug('>> PUBACK', ['packetId' => $msg->packetId]);
                     $this->trackWrite($puback);
-                    $this->touchActivity();
                     // QoS1 idempotency. MQTT-3.3.1-3: only a re-delivery (DUP=1) can be a
                     // copy of something already handed to the application. The broker is
                     // free to reuse a Packet Identifier the moment we PUBACK it, so
@@ -898,7 +1094,7 @@ final class Client implements ClientInterface
 
                         return true;
                     }
-                    $this->qos1Seen[$pid] = microtime(true);
+                    $this->qos1Seen[$pid] = Clock::now();
                     if (count($this->qos1Seen) > $this->qos1SeenMax) {
                         // Evict the oldest by key. array_shift() would renumber the
                         // integer Packet Identifier keys from 0 and corrupt the cache.
@@ -917,7 +1113,6 @@ final class Client implements ClientInterface
                     $pubrec = chr(PacketType::PUBREC->value << 4) . chr(2) . pack('n', $pid);
                     $this->logger->debug('>> PUBREC', ['packetId' => $pid]);
                     $this->trackWrite($pubrec);
-                    $this->touchActivity();
                     // Store message only if not already pending
                     if (! isset($this->qos2InboundPending[$pid])) {
                         $this->qos2InboundPending[$pid] = $msg;
@@ -933,7 +1128,7 @@ final class Client implements ClientInterface
             case PacketType::PINGRESP->value:
                 $this->logger->debug('<< PINGRESP');
                 // Clear outstanding flag to allow future auto PINGs
-                $this->pingOutstanding = false;
+                $this->pingSentAt = null;
 
                 return true;
             case PacketType::SUBACK->value:
@@ -977,7 +1172,6 @@ final class Client implements ClientInterface
                 $pubcomp = chr(PacketType::PUBCOMP->value << 4) . chr(2) . pack('n', $pid);
                 $this->logger->debug('>> PUBCOMP', ['packetId' => $pid]);
                 $this->trackWrite($pubcomp);
-                $this->touchActivity();
                 // Deliver stored message if pending
                 if (isset($this->qos2InboundPending[$pid])) {
                     $msg = $this->qos2InboundPending[$pid];
@@ -1001,7 +1195,6 @@ final class Client implements ClientInterface
                 $pubrel = chr((PacketType::PUBREL->value << 4) | 0x02) . chr(2) . pack('n', $pid);
                 $this->logger->debug('>> PUBREL', ['packetId' => $pid]);
                 $this->trackWrite($pubrel);
-                $this->touchActivity();
 
                 return true;
             case PacketType::PUBCOMP->value:
@@ -1091,7 +1284,7 @@ final class Client implements ClientInterface
             }
         }
 
-        $deadline = microtime(true) + $timeoutSec;
+        $deadline = Clock::now() + $timeoutSec;
         for (; ;) {
             // @phpstan-ignore-next-line - queue state may change after loopOnce()
             if (! $this->inbound->isEmpty()) {
@@ -1101,7 +1294,7 @@ final class Client implements ClientInterface
                 return $m;
             }
 
-            $left = $deadline - microtime(true);
+            $left = $deadline - Clock::now();
             if ($left <= 0) {
                 return null;
             }

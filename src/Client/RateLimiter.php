@@ -4,8 +4,9 @@ declare(strict_types=1);
 
 namespace ScienceStories\Mqtt\Client;
 
+use ScienceStories\Mqtt\Util\Clock;
+
 use function max;
-use function microtime;
 use function min;
 use function usleep;
 
@@ -31,7 +32,7 @@ final class RateLimiter
         private readonly int $burstSize = 10,
     ) {
         $this->tokens     = (float) $burstSize;
-        $this->lastRefill = microtime(true);
+        $this->lastRefill = Clock::now();
     }
 
     /**
@@ -87,7 +88,7 @@ final class RateLimiter
 
     private function refill(): void
     {
-        $now     = microtime(true);
+        $now     = Clock::now();
         $elapsed = $now - $this->lastRefill;
 
         if ($elapsed > 0) {

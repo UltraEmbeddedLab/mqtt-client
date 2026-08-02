@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace ScienceStories\Mqtt\Client;
 
+use ScienceStories\Mqtt\Util\Clock;
+
 /**
  * Manages MQTT 5.0 Flow Control via Receive Maximum.
  *
@@ -64,7 +66,7 @@ final class FlowControl
     public function trackSend(int $packetId): void
     {
         if (! isset($this->pending[$packetId])) {
-            $this->pending[$packetId] = microtime(true);
+            $this->pending[$packetId] = Clock::now();
             $this->currentInFlight++;
         }
     }
@@ -108,7 +110,7 @@ final class FlowControl
      */
     public function getTimedOutPackets(float $timeoutSeconds): array
     {
-        $now      = microtime(true);
+        $now      = Clock::now();
         $timedOut = [];
 
         foreach ($this->pending as $packetId => $sendTime) {

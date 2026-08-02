@@ -28,6 +28,9 @@ final class Options
     /** Generous enough that a consumer keeping up never sees it; small enough to bound memory. */
     public const int DEFAULT_INBOUND_QUEUE_SIZE = 1000;
 
+    /** Long enough to ride out a slow broker, short enough to notice a black-holed link. */
+    public const float DEFAULT_PING_RESPONSE_TIMEOUT = 10.0;
+
     /**
      * @param  TlsOptions|array<string, mixed>|null  $tlsOptions  TlsOptions object or raw stream context array
      * @param  list<string>  $messageFilters
@@ -77,6 +80,10 @@ final class Options
         // Bounded by default: in the push-only pattern (onMessage() plus a hand-rolled
         // loopOnce() loop) nothing drains it, so an unbounded queue is a slow OOM.
         public int $inboundQueueSize = self::DEFAULT_INBOUND_QUEUE_SIZE,
+        // How long to wait for a PINGRESP before declaring the connection dead.
+        // Without a deadline a single lost PINGRESP latches the outstanding-ping flag and
+        // keepalive stops for the life of the process, on a socket that still reports open.
+        public float $pingResponseTimeout = self::DEFAULT_PING_RESPONSE_TIMEOUT,
     ) {
         // The with*() setters validate, but the constructor is a public entry point too:
         // `new Options(host: 'x', maximumPacketSize: 0)` would otherwise reject the
@@ -90,6 +97,30 @@ final class Options
         if ($inboundQueueSize < 0) {
             throw new InvalidArgumentException("Inbound queue size cannot be negative, got $inboundQueueSize");
         }
+        if ($pingResponseTimeout <= 0) {
+            throw new InvalidArgumentException("Ping response timeout must be greater than 0, got $pingResponseTimeout");
+        }
+    }
+
+    /**
+     * How long to wait for a PINGRESP before treating the connection as dead.
+     *
+     * On expiry the client closes the transport, which is what lets auto-reconnect take
+     * over. Without this a black-holed link (NAT eviction, a hard-killed broker) leaves the
+     * client sitting on a socket that still reports open, receiving nothing, forever.
+     *
+     * @throws InvalidArgumentException if not greater than zero
+     */
+    public function withPingResponseTimeout(float $seconds): self
+    {
+        if ($seconds <= 0) {
+            throw new InvalidArgumentException("Ping response timeout must be greater than 0, got $seconds");
+        }
+
+        $c                      = clone $this;
+        $c->pingResponseTimeout = $seconds;
+
+        return $c;
     }
 
     public function withHost(string $host, int $port = 1883): self
