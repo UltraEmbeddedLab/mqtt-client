@@ -74,7 +74,7 @@ final class Encoder implements EncoderInterface
         $vh .= chr($flags);
 
         // Keep Alive (2 bytes)
-        $vh .= pack('n', $pkt->keepAlive);
+        $vh .= Bytes::encodeUint16($pkt->keepAlive, 'Keep Alive');
 
         // Properties (varint length). Include known properties when provided on packet.
         $props = '';
@@ -116,6 +116,21 @@ final class Encoder implements EncoderInterface
                     $u16 = 65535;
                 }
                 $props .= chr(0x22).pack('n', $u16);
+            }
+
+            // Maximum Packet Size (0x27) - four byte integer.
+            // Tells the broker the largest packet we will accept, per MQTT 5 §3.1.2.11.4.
+            // Without it the broker is entitled to send packets of any size.
+            if (array_key_exists('maximum_packet_size', $pkt->properties)) {
+                $val = $pkt->properties['maximum_packet_size'];
+                $u32 = is_int($val) ? $val : (int) (is_string($val) && is_numeric($val) ? $val : 0);
+                if ($u32 < 1) {
+                    $u32 = 1;
+                }
+                if ($u32 > 268_435_455) {
+                    $u32 = 268_435_455;
+                }
+                $props .= chr(0x27).pack('N', $u32);
             }
         }
         $vh .= Bytes::encodeVarInt(strlen($props)).$props;

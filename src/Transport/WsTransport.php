@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace ScienceStories\Mqtt\Transport;
 
 use Random\RandomException;
+use ScienceStories\Mqtt\Client\Options;
 use ScienceStories\Mqtt\Contract\TransportInterface;
+use ScienceStories\Mqtt\Exception\ProtocolError;
 use ScienceStories\Mqtt\Exception\Timeout;
 use ScienceStories\Mqtt\Exception\TransportError;
 use Throwable;
@@ -57,7 +59,12 @@ use function usleep;
  */
 final class WsTransport implements TransportInterface
 {
-    private const string WS_GUID = '258EAFA5-E914-47DA-95CA-5AB5DC46E97';
+    /**
+     * The GUID RFC 6455 §1.3 requires servers to append to Sec-WebSocket-Key before
+     * hashing. Exactly 36 characters — a single wrong character makes every handshake
+     * fail after the server has already returned a valid 101.
+     */
+    private const string WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
     private const int OPCODE_BINARY = 0x02;
 
@@ -78,8 +85,17 @@ final class WsTransport implements TransportInterface
     /** Buffer for reassembling fragmented MQTT data */
     private string $mqttBuffer = '';
 
+    /**
+     * @param  string  $path  HTTP path used for the Upgrade request
+     * @param  int  $maxFrameSize  Largest accepted WebSocket payload, in bytes. Checked
+     *                             against the declared length before allocating, so a
+     *                             peer cannot force a large allocation with a 10-byte
+     *                             header. Defaults to the same 16 MiB the client applies
+     *                             to MQTT packets.
+     */
     public function __construct(
         private readonly string $path = '/mqtt',
+        private readonly int $maxFrameSize = Options::DEFAULT_MAXIMUM_PACKET_SIZE,
     ) {
     }
 
@@ -388,6 +404,16 @@ final class WsTransport implements TransportInterface
             /** @var array{1: int} $unpacked */
             $unpacked   = unpack('J', $ext);
             $payloadLen = $unpacked[1];
+        }
+
+        // RFC 6455 permits a 63-bit length, and `unpack('J', ...)` turns anything at or
+        // above 2^63 into a negative int. Bound it before a single header byte can size
+        // an allocation. This runs before the MQTT layer sees anything, so it is the only
+        // place the WebSocket path can be protected.
+        if ($payloadLen < 0 || $payloadLen > $this->maxFrameSize) {
+            $this->close();
+
+            throw new ProtocolError("WebSocket frame of $payloadLen bytes exceeds the maximum of {$this->maxFrameSize}");
         }
 
         $mask = '';

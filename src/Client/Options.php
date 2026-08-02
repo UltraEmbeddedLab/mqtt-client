@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ScienceStories\Mqtt\Client;
 
+use InvalidArgumentException;
 use ScienceStories\Mqtt\Contract\SessionStoreInterface;
 use ScienceStories\Mqtt\Protocol\MqttVersion;
 
@@ -15,6 +16,18 @@ use function max;
  */
 final class Options
 {
+    /** Largest Remaining Length the MQTT specification permits. */
+    public const int PROTOCOL_MAXIMUM_PACKET_SIZE = 268_435_455;
+
+    /** Conservative default: well above any broker's own limit, far below an OOM. */
+    public const int DEFAULT_MAXIMUM_PACKET_SIZE = 16 * 1024 * 1024;
+
+    /** Largest Keep Alive representable in the two-byte CONNECT field. */
+    public const int MAXIMUM_KEEP_ALIVE = 65535;
+
+    /** Generous enough that a consumer keeping up never sees it; small enough to bound memory. */
+    public const int DEFAULT_INBOUND_QUEUE_SIZE = 1000;
+
     /**
      * @param  TlsOptions|array<string, mixed>|null  $tlsOptions  TlsOptions object or raw stream context array
      * @param  list<string>  $messageFilters
@@ -56,7 +69,27 @@ final class Options
         public float $ackTimeout = 5.0,
         // Number of resend attempts for unacknowledged QoS 1/2 messages (default 3)
         public int $maxResendAttempts = 3,
+        // Largest inbound packet accepted, in bytes of Remaining Length (default 16 MiB).
+        // Enforced before the body is read, so a hostile broker cannot force a large
+        // allocation by declaring one. Also advertised to MQTT 5 brokers as property 0x27.
+        public int $maximumPacketSize = self::DEFAULT_MAXIMUM_PACKET_SIZE,
+        // Bound on the queue backing awaitMessage()/messages() (0 = unlimited).
+        // Bounded by default: in the push-only pattern (onMessage() plus a hand-rolled
+        // loopOnce() loop) nothing drains it, so an unbounded queue is a slow OOM.
+        public int $inboundQueueSize = self::DEFAULT_INBOUND_QUEUE_SIZE,
     ) {
+        // The with*() setters validate, but the constructor is a public entry point too:
+        // `new Options(host: 'x', maximumPacketSize: 0)` would otherwise reject the
+        // client's own CONNACK, and a bad keepAlive would only surface at encode time.
+        if ($keepAlive < 0 || $keepAlive > self::MAXIMUM_KEEP_ALIVE) {
+            throw new InvalidArgumentException('Keep Alive must be between 0 and '.self::MAXIMUM_KEEP_ALIVE." seconds, got $keepAlive");
+        }
+        if ($maximumPacketSize < 1 || $maximumPacketSize > self::PROTOCOL_MAXIMUM_PACKET_SIZE) {
+            throw new InvalidArgumentException('Maximum packet size must be between 1 and '.self::PROTOCOL_MAXIMUM_PACKET_SIZE." bytes, got $maximumPacketSize");
+        }
+        if ($inboundQueueSize < 0) {
+            throw new InvalidArgumentException("Inbound queue size cannot be negative, got $inboundQueueSize");
+        }
     }
 
     public function withHost(string $host, int $port = 1883): self
@@ -85,8 +118,22 @@ final class Options
         return $c;
     }
 
+    /**
+     * Keep Alive interval in seconds. 0 disables the mechanism.
+     *
+     * The CONNECT field is two bytes wide, so values above 65535 cannot be represented
+     * and are rejected rather than silently truncated.
+     *
+     * @throws InvalidArgumentException if out of range
+     */
     public function withKeepAlive(int $seconds): self
     {
+        if ($seconds < 0 || $seconds > self::MAXIMUM_KEEP_ALIVE) {
+            throw new InvalidArgumentException(
+                'Keep Alive must be between 0 and '.self::MAXIMUM_KEEP_ALIVE." seconds, got $seconds",
+            );
+        }
+
         $c            = clone $this;
         $c->keepAlive = $seconds;
 
@@ -315,6 +362,54 @@ final class Options
     {
         $c                   = clone $this;
         $c->offlineQueueSize = max(0, $maxSize);
+
+        return $c;
+    }
+
+    /**
+     * Largest inbound packet the client will accept, in bytes of Remaining Length.
+     *
+     * Checked against the declared Remaining Length before the body is read, so a broker
+     * cannot force a large allocation by lying about it. On MQTT 5 the value is also sent
+     * as the Maximum Packet Size property (0x27) so the broker knows not to exceed it.
+     *
+     * @param int $bytes 1..268435455
+     *
+     * @throws InvalidArgumentException if out of range
+     */
+    public function withMaximumPacketSize(int $bytes): self
+    {
+        if ($bytes < 1 || $bytes > self::PROTOCOL_MAXIMUM_PACKET_SIZE) {
+            throw new InvalidArgumentException(
+                'Maximum packet size must be between 1 and '.self::PROTOCOL_MAXIMUM_PACKET_SIZE." bytes, got $bytes",
+            );
+        }
+
+        $c                    = clone $this;
+        $c->maximumPacketSize = $bytes;
+
+        return $c;
+    }
+
+    /**
+     * Bound the queue that backs awaitMessage() and messages().
+     *
+     * Only relevant for pull-style consumption: when an onMessage() handler is registered
+     * the handler consumes each message and nothing is queued. When the bound is reached
+     * the oldest message is dropped and counted on the `inbound_queue_dropped` metric.
+     *
+     * @param int $maxMessages Maximum buffered messages (0 = unlimited)
+     *
+     * @throws InvalidArgumentException if negative
+     */
+    public function withInboundQueueSize(int $maxMessages): self
+    {
+        if ($maxMessages < 0) {
+            throw new InvalidArgumentException("Inbound queue size cannot be negative, got $maxMessages");
+        }
+
+        $c                   = clone $this;
+        $c->inboundQueueSize = $maxMessages;
 
         return $c;
     }

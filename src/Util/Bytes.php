@@ -74,6 +74,26 @@ final class Bytes
     }
 
     /**
+     * Encode a two-byte integer field, rejecting values that would silently truncate.
+     *
+     * `pack('n', ...)` wraps modulo 65536, which turns an out-of-range Keep Alive or
+     * Packet Identifier into a wire-legal but wrong value. Every two-byte field should
+     * go through here.
+     *
+     * @param  string  $field  Field name used in the error message
+     *
+     * @throws ProtocolError if the value cannot be represented
+     */
+    public static function encodeUint16(int $value, string $field = 'Value'): string
+    {
+        if ($value < 0 || $value > 65535) {
+            throw new ProtocolError("$field must be between 0 and 65535, got $value");
+        }
+
+        return pack('n', $value);
+    }
+
+    /**
      * Encode an MQTT UTF-8 string (2-byte length prefix and UTF-8 bytes).
      *
      * @throws ProtocolError if string too long

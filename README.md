@@ -114,8 +114,12 @@ $client = new Client($options, new TcpTransport());
 $client->connect();
 
 // Subscribe to topics
-$client->subscribe([
+$client->subscribe(['sensors/#'], qos: 1);
+
+// ...or subscribeWith() when each filter needs its own QoS
+$client->subscribeWith([
     ['filter' => 'sensors/#', 'qos' => 1],
+    ['filter' => 'commands/+', 'qos' => 2],
 ]);
 
 // Handle incoming messages
@@ -155,26 +159,28 @@ $client->disconnect();
 
 ### Client Options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `host` | string | required | MQTT broker hostname |
-| `port` | int | 1883/8883 | Broker port (auto-detected based on TLS) |
-| `version` | MqttVersion | V3_1_1 | MQTT protocol version |
-| `clientId` | string | auto | Client identifier |
-| `keepAlive` | int | 60 | Keep alive interval in seconds |
-| `cleanSession` | bool | true | Start with clean session |
-| `username` | string | null | Authentication username |
-| `password` | string | null | Authentication password |
-| `ackTimeout` | float | 5.0 | Timeout (seconds) waiting for QoS 1/2 ACK before resend |
-| `maxResendAttempts` | int | 3 | Max resend attempts for unacknowledged QoS 1/2 messages |
+| Option              | Type        | Default   | Description                                             |
+|---------------------|-------------|-----------|---------------------------------------------------------|
+| `host`              | string      | required  | MQTT broker hostname                                    |
+| `port`              | int         | 1883/8883 | Broker port (auto-detected based on TLS)                |
+| `version`           | MqttVersion | V3_1_1    | MQTT protocol version                                   |
+| `clientId`          | string      | auto      | Client identifier                                       |
+| `keepAlive`         | int         | 60        | Keep alive interval in seconds                          |
+| `cleanSession`      | bool        | true      | Start with clean session                                |
+| `username`          | string      | null      | Authentication username                                 |
+| `password`          | string      | null      | Authentication password                                 |
+| `ackTimeout`         | float       | 5.0       | Timeout (seconds) waiting for QoS 1/2 ACK before resend                         |
+| `maxResendAttempts`  | int         | 3         | Max resend attempts for unacknowledged QoS 1/2 messages                        |
+| `maximumPacketSize`  | int         | 16 MiB    | Largest accepted inbound packet; also sent as MQTT 5 property `0x27`           |
+| `inboundQueueSize`   | int         | 1000      | Bound on the `awaitMessage()`/`messages()` queue (0 = unlimited)               |
 
 ### Publish Options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `qos` | QoS | AtMostOnce | Quality of Service level |
-| `retain` | bool | false | Retain message on broker |
-| `properties` | array | null | MQTT 5.0 properties |
+| Option       | Type  | Default    | Description              |
+|--------------|-------|------------|--------------------------|
+| `qos`        | QoS   | AtMostOnce | Quality of Service level |
+| `retain`     | bool  | false      | Retain message on broker |
+| `properties` | array | null       | MQTT 5.0 properties      |
 
 ### TLS Configuration
 
@@ -223,17 +229,17 @@ $tls = (new TlsOptions())
 $options = $options->withTls($tls);
 ```
 
-| TlsOptions Method | Description |
-|---|---|
-| `withCaFile(?string)` | CA certificate file for server verification |
-| `withCaPath(?string)` | Directory of CA certificates |
-| `withClientCertificate(?string, ?string, ?string)` | Client cert, key, and optional passphrase |
-| `withAlpn(?string)` | ALPN protocol (e.g., `'mqtt'` for port 443) |
-| `withVerifyPeer(bool)` | Verify server certificate (default: `true`) |
-| `withVerifyPeerName(bool)` | Verify server hostname (default: `true`) |
-| `withAllowSelfSigned(bool)` | Allow self-signed certs (default: `false`) |
-| `withPeerName(?string)` | Override peer name for SNI |
-| `withSni(bool)` | Enable/disable SNI (default: `true`) |
+| TlsOptions Method                                  | Description                                 |
+|----------------------------------------------------|---------------------------------------------|
+| `withCaFile(?string)`                              | CA certificate file for server verification |
+| `withCaPath(?string)`                              | Directory of CA certificates                |
+| `withClientCertificate(?string, ?string, ?string)` | Client cert, key, and optional passphrase   |
+| `withAlpn(?string)`                                | ALPN protocol (e.g., `'mqtt'` for port 443) |
+| `withVerifyPeer(bool)`                             | Verify server certificate (default: `true`) |
+| `withVerifyPeerName(bool)`                         | Verify server hostname (default: `true`)    |
+| `withAllowSelfSigned(bool)`                        | Allow self-signed certs (default: `false`)  |
+| `withPeerName(?string)`                            | Override peer name for SNI                  |
+| `withSni(bool)`                                    | Enable/disable SNI (default: `true`)        |
 
 > Legacy `array` syntax is still supported for backward compatibility:
 > `$options->withTls(['ssl' => ['verify_peer' => true]])`

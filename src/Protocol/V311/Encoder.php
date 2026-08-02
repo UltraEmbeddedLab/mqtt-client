@@ -8,6 +8,7 @@ use LogicException;
 use ScienceStories\Mqtt\Client\SubscribeOptions;
 use ScienceStories\Mqtt\Client\WillOptions;
 use ScienceStories\Mqtt\Contract\EncoderInterface;
+use ScienceStories\Mqtt\Exception\ProtocolError;
 use ScienceStories\Mqtt\Protocol\Packet\Connect;
 use ScienceStories\Mqtt\Protocol\Packet\PacketType;
 use ScienceStories\Mqtt\Protocol\Packet\Publish;
@@ -44,6 +45,12 @@ final class Encoder implements EncoderInterface
         // Username / Password
         $hasUser = $pkt->username !== null;
         $hasPass = $pkt->password !== null;
+        // MQTT-3.1.2-22: on 3.1.1 a Password requires a User Name. Brokers close the
+        // connection without a CONNACK when this is violated, which is undiagnosable
+        // from the client side, so reject it here. (MQTT 5 lifts the restriction.)
+        if ($hasPass && ! $hasUser) {
+            throw new ProtocolError('MQTT 3.1.1 does not allow a password without a username (MQTT-3.1.2-22)');
+        }
         if ($hasUser) {
             $flags |= 0x80;
         }
@@ -64,7 +71,7 @@ final class Encoder implements EncoderInterface
 
         $vh .= chr($flags);
         // Keep Alive (2 bytes)
-        $vh .= pack('n', $pkt->keepAlive);
+        $vh .= Bytes::encodeUint16($pkt->keepAlive, 'Keep Alive');
 
         // Payload
         $payload = Bytes::encodeString($pkt->clientId);

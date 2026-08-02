@@ -7,7 +7,6 @@ namespace ScienceStories\Mqtt\Easy;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 use Random\RandomException;
-use RuntimeException;
 use ScienceStories\Mqtt\Client\Client;
 use ScienceStories\Mqtt\Client\Options as ClientOptions;
 use ScienceStories\Mqtt\Client\PublishOptions;
@@ -17,8 +16,6 @@ use ScienceStories\Mqtt\Protocol\MqttVersion;
 use ScienceStories\Mqtt\Protocol\QoS;
 use ScienceStories\Mqtt\Transport\TcpTransport;
 use ScienceStories\Mqtt\Util\RandomId;
-
-use function sprintf;
 
 final class Mqtt
 {
@@ -172,19 +169,10 @@ final class Mqtt
         }
 
         $client = new Client($opts, new TcpTransport(), logger: $logger ?? new NullLogger());
-        $result = $client->connect();
-
-        // Broker accepted validate connection
-        if ($result->reasonCode !== 0) {
-            throw new RuntimeException(
-                sprintf(
-                    'MQTT connection refused by broker %s:%d (reason code: %d)',
-                    $host,
-                    $port,
-                    $result->reasonCode
-                )
-            );
-        }
+        // Client::connect() throws a typed MqttException (AuthenticationError,
+        // ServerError, ProtocolError) when the broker refuses. Those extend
+        // RuntimeException, so existing catch blocks keep working.
+        $client->connect();
 
         return $client;
     }

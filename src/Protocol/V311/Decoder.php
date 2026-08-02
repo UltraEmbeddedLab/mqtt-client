@@ -86,7 +86,10 @@ final class Decoder implements DecoderInterface
         $dup    = (bool) (($flags & 0x08) >> 3);
         $qosVal = ($flags & 0x06) >> 1;
         $retain = (bool) ($flags & 0x01);
-        $qos    = QoS::from($qosVal);
+        // MQTT-3.3.1-4: both QoS bits set is a Malformed Packet. QoS::from() would raise
+        // a \ValueError, which sits outside MqttException and escapes every documented
+        // catch block, killing a long-running loop.
+        $qos = QoS::tryFrom($qosVal) ?? throw new ProtocolError("Malformed PUBLISH: invalid QoS bits ($qosVal)");
 
         $offset   = 0;
         $topic    = Bytes::decodeString($packetBody, $offset);

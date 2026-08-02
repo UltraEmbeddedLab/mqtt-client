@@ -19,10 +19,14 @@ use ScienceStories\Mqtt\Events\MessageReceived as EvMessageReceived;
 use ScienceStories\Mqtt\Events\PacketReceived as EvPacketReceived;
 use ScienceStories\Mqtt\Events\PacketSent as EvPacketSent;
 use ScienceStories\Mqtt\Events\ServerDisconnect as EvServerDisconnect;
+use ScienceStories\Mqtt\Exception\AuthenticationError;
+use ScienceStories\Mqtt\Exception\MqttException;
 use ScienceStories\Mqtt\Exception\ProtocolError;
+use ScienceStories\Mqtt\Exception\ServerError;
 use ScienceStories\Mqtt\Exception\Timeout;
 use ScienceStories\Mqtt\Exception\TransportError;
 use ScienceStories\Mqtt\Protocol\MqttVersion;
+use ScienceStories\Mqtt\Protocol\Packet\ConnAck;
 use ScienceStories\Mqtt\Protocol\Packet\Connect as ConnectPacket;
 use ScienceStories\Mqtt\Protocol\Packet\PacketType;
 use ScienceStories\Mqtt\Protocol\Packet\PubAck;
@@ -30,6 +34,7 @@ use ScienceStories\Mqtt\Protocol\Packet\PubComp;
 use ScienceStories\Mqtt\Protocol\Packet\Publish;
 use ScienceStories\Mqtt\Protocol\Packet\SubAck;
 use ScienceStories\Mqtt\Protocol\Packet\UnsubAck;
+use ScienceStories\Mqtt\Protocol\ReasonCode;
 use ScienceStories\Mqtt\Protocol\V311\Decoder as V311Decoder;
 use ScienceStories\Mqtt\Protocol\V311\Encoder as V311Encoder;
 use ScienceStories\Mqtt\Protocol\V5\Decoder as V5Decoder;
@@ -43,6 +48,7 @@ use Throwable;
 
 use function array_any;
 use function array_key_exists;
+use function array_key_first;
 use function array_keys;
 use function array_shift;
 use function bin2hex;
@@ -207,6 +213,9 @@ final class Client implements ClientInterface
     public function connect(): ConnectResult
     {
         $connectStart = microtime(true);
+        // Nothing from a previous connection may leak into this one: Packet Identifiers,
+        // topic aliases and flow-control quota are all connection-scoped.
+        $this->resetConnectionState();
         $this->logger->info('Opening connection', ['host' => $this->options->host, 'port' => $this->options->port]);
         $this->transport->open($this->options->host, $this->options->port);
 
@@ -242,6 +251,10 @@ final class Client implements ClientInterface
             }
             if ($this->options->topicAliasMaximum > 0) {
                 $connectProps['topic_alias_maximum'] = $this->options->topicAliasMaximum;
+            }
+            if ($this->options->maximumPacketSize < Options::PROTOCOL_MAXIMUM_PACKET_SIZE) {
+                // Make the local limit a negotiated one rather than a unilateral cut-off.
+                $connectProps['maximum_packet_size'] = $this->options->maximumPacketSize;
             }
             if ($connectProps === []) {
                 $connectProps = null;
@@ -286,6 +299,12 @@ final class Client implements ClientInterface
             // v3: at least 2 bytes (ack flags + return code), v5: also followed by properties
             throw new ProtocolError("Invalid CONNACK length: $remainingLen");
         }
+        // Bound the allocation before it happens: this read is pre-authentication, so an
+        // unauthenticated peer must not be able to size it. connect() has no bool contract
+        // to honour, so a violation here is fatal rather than a skipped packet.
+        if (! $this->packetSizeAllowed($remainingLen, 'CONNACK')) {
+            throw new ProtocolError("Declared CONNACK size of $remainingLen bytes exceeds the maximum of {$this->options->maximumPacketSize}");
+        }
 
         $body = $this->trackRead($remainingLen, 5.0);
         $this->touchActivity();
@@ -295,6 +314,24 @@ final class Client implements ClientInterface
         $versionStr = $this->options->version->value;
 
         $this->logger->info('CONNACK', ['sessionPresent' => $connack->sessionPresent, 'reasonCode' => $connack->returnCode, 'version' => $versionStr]);
+
+        if ($connack->returnCode !== 0) {
+            // MQTT-3.2.2-7: the broker closes the network connection after a refusal.
+            // Returning normally here would make the caller replay buffered publishes
+            // into a dead socket and surface an auth failure as a later read timeout.
+            $this->transport->close();
+            $exception = $this->connectRefusedException($connack);
+            $this->logger->warning('CONNECT refused', ['reasonCode' => $connack->returnCode, 'error' => $exception->getMessage()]);
+
+            throw $exception;
+        }
+
+        // Inbound QoS 2 messages awaiting PUBREL are Session state. Discard them only
+        // when the broker has discarded its half of the session too, otherwise a replayed
+        // PUBREL would be answered with PUBCOMP for a message never delivered upstream.
+        if ($this->options->cleanSession || ! $connack->sessionPresent) {
+            $this->qos2InboundPending = [];
+        }
 
         $assignedId = null;
         if ($this->options->version === MqttVersion::V5_0 && is_array($connack->properties)) {
@@ -369,7 +406,21 @@ final class Client implements ClientInterface
     }
 
     /**
-     * Reset connection-scoped state (topic aliases, flow control).
+     * Reset every piece of state scoped to a single network connection.
+     *
+     * Packet Identifiers, topic aliases and flow-control quota are all defined per
+     * connection, so anything surviving a reconnect corrupts the next session — a stale
+     * `pingOutstanding` silently disables keepalive for the life of the process, and a
+     * stale de-duplication cache drops messages the new session has never seen.
+     *
+     * Two things are deliberately *not* cleared here:
+     * - the inbound message queue, which is the caller's data and may still be waiting
+     *   for awaitMessage();
+     * - `$qos2InboundPending`, which MQTT-4.1.0-1 defines as *Session* state. After we
+     *   answer a QoS 2 PUBLISH with PUBREC the broker's recovery procedure (§4.3.3)
+     *   replays only the PUBREL, so dropping the stored message here would make us
+     *   PUBCOMP a message the application never received. It is discarded in connect()
+     *   instead, and only when the broker has discarded its half too.
      */
     private function resetConnectionState(): void
     {
@@ -379,6 +430,67 @@ final class Client implements ClientInterface
         if ($this->flowControl instanceof FlowControl) {
             $this->flowControl->reset();
         }
+        $this->qos1Seen        = [];
+        $this->pingOutstanding = false;
+        $this->lastSubAck      = null;
+        $this->lastUnsubAck    = null;
+        $this->lastPubAck      = null;
+        $this->lastPubComp     = null;
+        $this->touchActivity();
+    }
+
+    /**
+     * Whether a declared Remaining Length is within the configured maximum.
+     *
+     * Called before the body is read: `Bytes::decodeVarInt()` legitimately returns values
+     * up to 268,435,455, so five header bytes would otherwise be enough for any peer to
+     * request a 256 MiB allocation.
+     *
+     * On rejection the transport is closed, because the stream is positioned mid-frame
+     * and there is no way to resynchronise it. Callers decide whether to throw.
+     */
+    private function packetSizeAllowed(int $remainingLength, string $what): bool
+    {
+        $max = $this->options->maximumPacketSize;
+        if ($remainingLength <= $max) {
+            return true;
+        }
+
+        $this->logger->warning('Inbound packet exceeds maximum packet size', [
+            'what'     => $what,
+            'declared' => $remainingLength,
+            'maximum'  => $max,
+        ]);
+        $this->transport->close();
+        if ($this->metrics instanceof MetricsInterface) {
+            $this->metrics->increment('oversized_packets_rejected');
+        }
+
+        return false;
+    }
+
+    /**
+     * Map a refused CONNACK onto the most specific exception type.
+     *
+     * MQTT 3.1.1 return codes 1-5 and MQTT 5 reason codes are different namespaces and
+     * must not be mapped through the same table.
+     */
+    private function connectRefusedException(ConnAck $connack): MqttException
+    {
+        $code = $connack->returnCode;
+
+        if ($this->options->version === MqttVersion::V5_0) {
+            return ReasonCode::tryFromInt($code)?->toException('CONNECT')
+                ?? new ProtocolError('CONNECT refused with unknown reason code '.$code, $code);
+        }
+
+        $message = 'CONNECT refused: '.$connack->getReasonDescription(MqttVersion::V3_1_1);
+
+        return match ($code) {
+            3 => new ServerError($message, $code),
+            4, 5 => new AuthenticationError($message, $code),
+            default => new ProtocolError($message, $code),
+        };
     }
 
     public function publish(string $topic, string $payload, ?PublishOptions $options = null): int
@@ -648,8 +760,8 @@ final class Client implements ClientInterface
             }
             // loopOnce handles SUBACK internally and stores last; break when found
             if ($this->lastSubAck instanceof SubAck && $this->lastSubAck->packetId === $pid) {
-                $subAck = $this->lastSubAck;
-                unset($this->lastSubAck);
+                $subAck           = $this->lastSubAck;
+                $this->lastSubAck = null;
                 $this->logger->info('SUBACK', ['packetId' => $pid, 'codes' => $subAck->returnCodes]);
 
                 // Record subscriptions if this is a user-initiated subscription (avoid duplicate records during resubscribe)
@@ -696,9 +808,9 @@ final class Client implements ClientInterface
                 continue;
             }
             if ($this->lastUnsubAck instanceof UnsubAck && $this->lastUnsubAck->packetId === $pid) {
-                $unsuback = $this->lastUnsubAck;
-                unset($this->lastUnsubAck);
-                $codes = $unsuback->reasonCodes ?? [];
+                $unsuback           = $this->lastUnsubAck;
+                $this->lastUnsubAck = null;
+                $codes              = $unsuback->reasonCodes ?? [];
                 $this->logger->info('UNSUBACK', ['packetId' => $pid, 'codes' => $codes]);
 
                 // Remove from stored subscriptions
@@ -752,7 +864,14 @@ final class Client implements ClientInterface
         }
         $consumed = 0;
         $rl       = Bytes::decodeVarInt($varBytes, $consumed);
-        $body     = $this->trackRead($rl, $timeoutSec);
+        if (! $this->packetSizeAllowed($rl, 'packet')) {
+            // The stream is positioned mid-frame and cannot be resynchronised, so the
+            // transport is already closed. Report it the way every other transport-level
+            // failure in this method does — as "no packet processed" — so the documented
+            // bool contract holds and auto-reconnect can take over on the next call.
+            return false;
+        }
+        $body = $this->trackRead($rl, $timeoutSec);
         $this->touchActivity();
         // PSR-14: emit PacketReceived with full frame bytes
         $raw = $b0.$varBytes.$body;
@@ -771,17 +890,21 @@ final class Client implements ClientInterface
                     $this->logger->debug('>> PUBACK', ['packetId' => $msg->packetId]);
                     $this->trackWrite($puback);
                     $this->touchActivity();
-                    // QoS1 idempotency: suppress duplicate deliveries for same Packet Identifier
+                    // QoS1 idempotency. MQTT-3.3.1-3: only a re-delivery (DUP=1) can be a
+                    // copy of something already handed to the application. The broker is
+                    // free to reuse a Packet Identifier the moment we PUBACK it, so
+                    // matching on the identifier alone would discard unrelated messages.
                     $pid = $msg->packetId;
-                    if (isset($this->qos1Seen[$pid])) {
+                    if ($msg->dup && isset($this->qos1Seen[$pid])) {
                         $this->logger->debug('QoS1 duplicate PUBLISH suppressed', ['packetId' => $pid, 'dup' => $msg->dup]);
 
                         return true;
                     }
                     $this->qos1Seen[$pid] = microtime(true);
                     if (count($this->qos1Seen) > $this->qos1SeenMax) {
-                        // Drop the oldest (insertion order preserved in PHP arrays)
-                        array_shift($this->qos1Seen);
+                        // Evict the oldest by key. array_shift() would renumber the
+                        // integer Packet Identifier keys from 0 and corrupt the cache.
+                        unset($this->qos1Seen[array_key_first($this->qos1Seen)]);
                     }
                     // QoS1: decide delivery based on client-side filters
                     $this->logger->debug('<< PUBLISH', ['topic' => $msg->topic, 'bytes' => $rl, 'qos' => $msg->qos->value, 'retain' => $msg->retain]);
@@ -1001,7 +1124,13 @@ final class Client implements ClientInterface
             if ($this->shouldStop) {
                 break;
             }
-            if ($this->loopOnce(0.2) === false && ($idleSleep !== null && $idleSleep > 0)) {
+            $processed = $this->loopOnce(0.2);
+            // The handler registered above has already been invoked for anything queued,
+            // so drain it here. Without this the queue only ever grows in this loop.
+            while (! $this->inbound->isEmpty()) {
+                $this->inbound->dequeue();
+            }
+            if ($processed === false && ($idleSleep !== null && $idleSleep > 0)) {
                 usleep((int) floor($idleSleep * 1_000_000));
             }
         }
@@ -1132,26 +1261,50 @@ final class Client implements ClientInterface
     private function deliverIfMatches(InboundMessage $msg): void
     {
         $filters = $this->options->messageFilters;
-        if ($filters === [] || $this->topicMatchesAny($msg->topic, $filters)) {
-            $this->inbound->enqueue($msg);
-            if ($this->metrics instanceof MetricsInterface) {
-                $this->metrics->increment('messages_delivered', 1.0, ['qos' => $msg->qos->value, 'retain' => $msg->retain ? 1 : 0]);
-                $this->metrics->size('message_payload_bytes', strlen($msg->payload), ['dir' => 'in', 'qos' => $msg->qos->value]);
-            }
-            // PSR-14: emit MessageReceived when the message is accepted for delivery
-            $this->dispatch(new EvMessageReceived($msg));
-            if ($this->messageHandler) {
-                try {
-                    ($this->messageHandler)($msg);
-                } catch (Throwable $e) {
-                    $this->logger->error('Message handler threw exception', [
-                        'topic' => $msg->topic,
-                        'error' => $e->getMessage(),
-                    ]);
-                }
-            }
-        } else {
+        if ($filters !== [] && ! $this->topicMatchesAny($msg->topic, $filters)) {
             $this->logger->debug('Message filtered out by client filters', ['topic' => $msg->topic]);
+
+            return;
+        }
+
+        if ($this->metrics instanceof MetricsInterface) {
+            $this->metrics->increment('messages_delivered', 1.0, ['qos' => $msg->qos->value, 'retain' => $msg->retain ? 1 : 0]);
+            $this->metrics->size('message_payload_bytes', strlen($msg->payload), ['dir' => 'in', 'qos' => $msg->qos->value]);
+        }
+        // PSR-14: emit MessageReceived when the message is accepted for delivery
+        $this->dispatch(new EvMessageReceived($msg));
+
+        $hasHandler = $this->messageHandler !== null;
+
+        // Pull delivery: awaitMessage(), messages() and Client\RequestResponse drain this
+        // queue. It is fed even when a handler is registered, because the two channels are
+        // documented as independent — but it is bounded, because nothing drains it in the
+        // push-only pattern.
+        $limit = $this->options->inboundQueueSize;
+        if ($limit > 0 && count($this->inbound) >= $limit) {
+            $this->inbound->dequeue();
+            if ($this->metrics instanceof MetricsInterface) {
+                $this->metrics->increment('inbound_queue_dropped');
+            }
+            if ($hasHandler) {
+                // Expected in the push-only pattern: the handler already consumed it.
+                $this->logger->debug('Inbound queue full; oldest message discarded', ['limit' => $limit]);
+            } else {
+                $this->logger->warning('Inbound queue full; oldest message dropped before delivery', ['limit' => $limit, 'topic' => $msg->topic]);
+            }
+        }
+        $this->inbound->enqueue($msg);
+
+        // Push delivery.
+        if ($hasHandler) {
+            try {
+                ($this->messageHandler)($msg);
+            } catch (Throwable $e) {
+                $this->logger->error('Message handler threw exception', [
+                    'topic' => $msg->topic,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
     }
 
