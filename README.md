@@ -11,8 +11,8 @@ Modern, production-grade MQTT 3.1.1 & 5.0 client for PHP 8.4+
 
 - **Modern PHP 8.4+** with strict types and modern syntax
 - **MQTT 3.1.1 & 5.0** protocol support
-- **TLS/SSL & mutual TLS (mTLS)** with typed `TlsOptions` — client certificates, CA verification, ALPN
-- **WebSocket transport** (`ws://`, `wss://`) with RFC 6455 framing
+- **TLS 1.2+ & mutual TLS (mTLS)** — TLS 1.0/1.1 refused by default (RFC 8996); typed `TlsOptions` for client certificates, CA verification and ALPN
+- **WebSocket transport** (`ws://`) with RFC 6455 framing — `wss://` is not functional yet, see [Known Limitations](#known-limitations)
 - **Auto-reconnect** with exponential backoff and jitter
 - **QoS 0, 1, 2** with automatic resend on ACK timeout
 - **Session persistence** for reliable message delivery
@@ -164,13 +164,20 @@ $client->disconnect();
 | Option              | Type        | Default   | Description                                             |
 |---------------------|-------------|-----------|---------------------------------------------------------|
 | `host`              | string      | required  | MQTT broker hostname                                    |
-| `port`              | int         | 1883/8883 | Broker port (auto-detected based on TLS)                |
+| `port`              | int         | `1883`    | Broker port. **Not** derived from TLS — pass `8883` yourself. (`Easy\Mqtt::publish()` auto-detects; `Options` does not.) |
 | `version`           | MqttVersion | V3_1_1    | MQTT protocol version                                   |
-| `clientId`          | string      | auto      | Client identifier                                       |
-| `keepAlive`         | int         | 60        | Keep alive interval in seconds                          |
+| `clientId`          | string      | `''`      | Client identifier. Empty means the broker assigns one, which MQTT 3.1.1 allows only with `cleanSession: true`. `Easy\Mqtt` generates one for you. |
+| `keepAlive`         | int         | 60        | Keep alive interval in seconds (0–65535)                |
 | `cleanSession`      | bool        | true      | Start with clean session                                |
 | `username`          | string      | null      | Authentication username                                 |
 | `password`          | string      | null      | Authentication password                                 |
+| `will`              | ?WillOptions | null     | Last Will and Testament                                 |
+| `autoReconnect`     | bool        | false     | Reconnect with exponential backoff — see `withAutoReconnect()` |
+| `offlineQueueSize`  | int         | 0         | Publishes buffered while disconnected, drained on reconnect (0 = off) |
+| `rateLimiter`       | ?RateLimiter | null     | Token-bucket throttle for outbound publishes            |
+| `sessionStore`      | ?SessionStoreInterface | null | Persist subscriptions across restarts (use with `cleanSession: false`) |
+| `topicAliasMaximum` | int         | 0         | MQTT 5 topic aliases to request (0 = disabled)          |
+| `receiveMaximum`    | int         | 65535     | MQTT 5 flow-control window                              |
 | `ackTimeout`         | float       | 5.0       | Timeout (seconds) waiting for QoS 1/2 ACK before resend                         |
 | `maxResendAttempts`  | int         | 3         | Max resend attempts for unacknowledged QoS 1/2 messages                        |
 | `maximumPacketSize`  | int         | 16 MiB    | Largest accepted inbound packet; also sent as MQTT 5 property `0x27`           |
@@ -191,8 +198,12 @@ Simple TLS (server verification only):
 ```php
 use ScienceStories\Mqtt\Client\TlsOptions;
 
-$options = $options->withTls(new TlsOptions());
+// Note the explicit port: withTls() does not change it, and the default is 1883.
+$options = (new Options('broker.example.com', 8883))->withTls(new TlsOptions());
 ```
+
+> `withHost('other-broker')` resets the port to 1883. When changing host on an existing
+> `Options`, pass both: `withHost('other-broker', 8883)`.
 
 Mutual TLS with client certificate (AWS IoT, Azure IoT Hub):
 
@@ -242,6 +253,18 @@ $options = $options->withTls($tls);
 | `withAllowSelfSigned(bool)`                        | Allow self-signed certs (default: `false`)  |
 | `withPeerName(?string)`                            | Override peer name for SNI                  |
 | `withSni(bool)`                                    | Enable/disable SNI (default: `true`)        |
+| `withCryptoMethod(int)`                            | Override negotiated TLS versions (bitmask of `STREAM_CRYPTO_METHOD_*_CLIENT`) |
+
+> **TLS 1.2 and 1.3 only, by default.** PHP's own `STREAM_CRYPTO_METHOD_TLS_CLIENT` still
+> enables TLS 1.0 and 1.1, which RFC 8996 marks MUST NOT and PCI-DSS prohibits. This client
+> refuses them unless you widen the policy explicitly:
+>
+> ```php
+> // Only for a broker that genuinely cannot do TLS 1.2.
+> $tls = (new TlsOptions())->withCryptoMethod(
+>     STREAM_CRYPTO_METHOD_TLSv1_1_CLIENT | TlsOptions::DEFAULT_CRYPTO_METHOD,
+> );
+> ```
 
 > Legacy `array` syntax is still supported for backward compatibility:
 > `$options->withTls(['ssl' => ['verify_peer' => true]])`
@@ -250,13 +273,28 @@ $options = $options->withTls($tls);
 
 ### Topic Aliases
 
-Reduce bandwidth by using numeric aliases for frequently used topics:
+Topic aliases replace a repeated topic string with a two-byte integer. They are managed
+automatically — request a budget on `Options`, then publish normally:
 
 ```php
-$client->publish('long/topic/name', 'data', new PublishOptions(
-    properties: ['topic_alias' => 1],
-));
+$options = (new Options('broker.example.com', 1883, version: MqttVersion::V5_0))
+    ->withTopicAliasMaximum(10);
+
+$client = new Client($options, new TcpTransport());
+$client->connect();
+
+// First publish sends the topic and establishes the alias.
+$client->publish('factory/line-3/press/temperature', '218.4');
+// Later publishes to the same topic send two bytes instead of thirty-four.
+$client->publish('factory/line-3/press/temperature', '218.9');
 ```
+
+The broker's `topic_alias_maximum` in CONNACK overrides your request; if it advertises 0,
+aliasing is disabled and publishes fall back to full topic strings.
+
+> Do not set the `topic_alias` property by hand on `PublishOptions`. Aliases are
+> connection-scoped and negotiated — a hand-set value is either overwritten by the client
+> or rejected by the broker with reason code 0x94 (Topic Alias Invalid).
 
 ### Message Expiry
 
@@ -282,6 +320,73 @@ $client->publish('events/user', $payload, new PublishOptions(
     ],
 ));
 ```
+
+## Error Handling
+
+Every error this library raises extends `ScienceStories\Mqtt\Exception\MqttException`,
+which extends `RuntimeException` — so a single `catch` covers the whole surface.
+
+| Exception            | Raised when                                                                 |
+|----------------------|-----------------------------------------------------------------------------|
+| `AuthenticationError` | The broker refused the credentials (CONNACK 4/5 on 3.1.1, 0x86/0x87 on MQTT 5) |
+| `ServerError`         | The broker is unavailable, busy, or shutting down                          |
+| `QuotaExceeded`       | A broker rate or quota limit was hit                                       |
+| `ProtocolError`       | A malformed packet, an oversized packet, or an invalid local configuration  |
+| `Timeout`             | No ACK or data arrived within the deadline                                  |
+| `TransportError`      | Socket or TLS failure — connection refused, closed by peer, handshake failed |
+
+`connect()` throws rather than returning a failed result, so a refused connection cannot
+be mistaken for a live one:
+
+```php
+use ScienceStories\Mqtt\Exception\AuthenticationError;
+use ScienceStories\Mqtt\Exception\MqttException;
+use ScienceStories\Mqtt\Exception\TransportError;
+
+try {
+    $client->connect();
+} catch (AuthenticationError $e) {
+    // Bad credentials — retrying will not help.
+    throw $e;
+} catch (TransportError|Timeout $e) {
+    // Network-level; safe to retry with backoff.
+    $logger->warning('Broker unreachable', ['error' => $e->getMessage()]);
+}
+```
+
+A long-running loop should survive transient failures rather than dying on the first one:
+
+```php
+$client->onMessage(fn ($message) => handle($message));
+
+while (true) {
+    try {
+        $client->loopOnce(1.0);
+    } catch (MqttException $e) {
+        $logger->error('MQTT loop error', ['error' => $e->getMessage()]);
+        usleep(500_000);
+    }
+}
+```
+
+With `withAutoReconnect()` enabled, `loopOnce()` re-establishes the connection and
+re-subscribes on its own; it returns `false` while disconnected rather than throwing.
+
+## Known Limitations
+
+Stated up front rather than discovered in production:
+
+- **`wss://` does not work.** `WsTransport` performs the HTTP upgrade before TLS can be
+  enabled, so only `ws://` completes a handshake. `ws://` itself has no test coverage yet.
+- **Inbound MQTT 5 topic aliases are not resolved.** If a broker sends aliased PUBLISH
+  packets, the topic arrives empty. Leave `withTopicAliasMaximum()` at 0 (the default).
+- **Acknowledgement reason codes are not acted on.** A PUBACK or SUBACK carrying a failure
+  code is logged, not raised — a rejected subscription looks successful.
+- **The client is blocking.** There is no ReactPHP/Amp adapter yet; run it in a dedicated
+  process or worker.
+- **No Laravel or Symfony bridge yet.**
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed and what is planned.
 
 ## Documentation
 

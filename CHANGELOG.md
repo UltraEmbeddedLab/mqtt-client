@@ -145,3 +145,9 @@ These are behavioural, not source-level, breaks: code that compiles today keeps 
 - PSR-3 logging support
 - Easy facade for simple usage
 - Comprehensive examples and documentation
+
+[Unreleased]: https://github.com/UltraEmbeddedLab/php-iot/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/UltraEmbeddedLab/php-iot/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/UltraEmbeddedLab/php-iot/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/UltraEmbeddedLab/php-iot/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/UltraEmbeddedLab/php-iot/releases/tag/v1.0.0

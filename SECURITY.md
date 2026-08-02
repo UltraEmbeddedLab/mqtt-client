@@ -2,10 +2,18 @@
 
 ## Supported Versions
 
-| Version | Supported          |
-|---------|--------------------|
-| 1.1.x   | :white_check_mark: |
-| 1.0.x   | :x:                |
+Security fixes land on the **latest minor release of the current major**. Older minors
+receive fixes only for critical vulnerabilities, and only for six months after the next
+minor ships. This is a rolling policy — it does not go stale as releases are cut.
+
+| Version        | Supported                          |
+|----------------|------------------------------------|
+| Latest minor   | :white_check_mark: all fixes       |
+| Previous minor | :warning: critical only, 6 months  |
+| Older          | :x:                                |
+
+Run `composer show ultraembeddedlab/php-iot` to see which you are on, and check
+[releases](https://github.com/UltraEmbeddedLab/php-iot/releases) for the current minor.
 
 ## Reporting a Vulnerability
 
@@ -14,6 +22,12 @@ If you discover a security vulnerability in this project, please report it respo
 **Do NOT open a public GitHub issue for security vulnerabilities.**
 
 ### How to Report
+
+Preferred: [open a private security advisory](https://github.com/UltraEmbeddedLab/php-iot/security/advisories/new)
+through GitHub Private Vulnerability Reporting. It keeps the report, the discussion and
+the fix in one place and lets us issue a CVE.
+
+Alternatively:
 
 1. Email: **gewaldb@gmail.com**
 2. Subject line: `[SECURITY] php-iot vulnerability report`

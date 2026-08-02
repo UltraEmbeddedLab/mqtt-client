@@ -1,9 +1,14 @@
 {
   "name": "ultraembeddedlab/php-iot",
-  "description": "Modern, production-grade MQTT 3.1.1 & 5 client for PHP 8.4+",
+  "description": "MQTT 3.1.1 and MQTT 5.0 client for PHP 8.4+ — QoS 0/1/2, TLS and mutual TLS, WebSocket transport, auto-reconnect, persistent sessions",
   "type": "library",
   "license": "MIT",
-  "keywords": ["mqtt", "mqtt5", "mqtt3", "iot", "client", "php8.4", "networking", "pub-sub", "message-broker"],
+  "keywords": [
+    "mqtt", "mqtt-client", "mqtt5", "mqtt-5", "mqtt3", "mqtt-3.1.1",
+    "iot", "pub-sub", "publish-subscribe", "message-broker", "broker",
+    "mosquitto", "hivemq", "emqx", "aws-iot", "azure-iot",
+    "websocket", "mtls", "qos", "telemetry", "home-assistant", "smart-home"
+  ],
   "homepage": "https://github.com/UltraEmbeddedLab/php-iot",
   "authors": [
     {
@@ -15,7 +20,9 @@
   ],
   "support": {
     "issues": "https://github.com/UltraEmbeddedLab/php-iot/issues",
-    "source": "https://github.com/UltraEmbeddedLab/php-iot"
+    "source": "https://github.com/UltraEmbeddedLab/php-iot",
+    "docs": "https://github.com/UltraEmbeddedLab/php-iot/tree/main/docs",
+    "security": "https://github.com/UltraEmbeddedLab/php-iot/security/policy"
   },
   "require": {
     "php": "^8.4",
