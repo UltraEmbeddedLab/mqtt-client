@@ -687,7 +687,6 @@ final class Client implements ClientInterface
                     }
                     // Completion when PUBCOMP arrives for our packetId
                     $comp = $this->lastPubComp;
-                    // @phpstan-ignore-next-line state is updated by loopOnce()
                     if ($comp instanceof PubComp && $comp->packetId === $pid) {
                         $this->logger->info('PUBCOMP', ['packetId' => $comp->packetId, 'reasonCode' => $comp->reasonCode, 'success' => $comp->isSuccess()]);
                         $this->lastPubComp = null;

@@ -29,7 +29,7 @@ if ($files === []) {
     $files = array_merge(
         glob($root.'/.github/workflows/*.yml') ?: [],
         glob($root.'/.github/workflows/*.yaml') ?: [],
-        array_filter([$root.'/.github/dependabot.yml'], 'is_file'),
+        array_filter([$root.'/.github/dependabot.yml'], is_file(...)),
     );
 }
 

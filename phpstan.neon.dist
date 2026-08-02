@@ -6,10 +6,9 @@ parameters:
   bootstrapFiles:
     - vendor/autoload.php
   treatPhpDocTypesAsCertain: true
-  reportUnmatchedIgnoredErrors: false
-  ignoreErrors:
-    - message: '#Access to private property .+\:\:\$maxInFlight#'
-      path: src/Client/Client.php
+  # Dead suppressions are themselves a defect: they hide the moment a workaround stops
+  # being needed. Keep this on so an unmatched ignore fails the build.
+  reportUnmatchedIgnoredErrors: true
   checkMissingTypehints: true
   inferPrivatePropertyTypeFromConstructor: true
   parallel:
