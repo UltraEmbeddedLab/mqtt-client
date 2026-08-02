@@ -27,12 +27,13 @@
     "ext-openssl": "Required for TLS/SSL connections (mqtts://, wss://). Plain TCP works without it."
   },
   "require-dev": {
+    "laravel/pint": "^v1.29.0",
     "pestphp/pest": "^v4.4.3",
     "pestphp/pest-plugin-type-coverage": "^v4.0.3",
     "phpstan/phpstan": "^2.1.46",
-    "laravel/pint": "^v1.29.0",
     "rector/rector": "^2.3.9",
     "symfony/var-dumper": "^v7.4.8",
+    "symfony/yaml": "^8.1",
     "vlucas/phpdotenv": "^v5.6.3"
   },
   "autoload": {
@@ -55,12 +56,13 @@
     "type-coverage": "pest --type-coverage",
     "stan": "phpstan analyse --memory-limit=1G",
     "pint": "pint",
-    "lint": "@pint --test && @stan",
+    "lint:workflows": "php tools/lint-workflows.php",
+    "lint": "@pint --test && @stan && @lint:workflows",
     "rector": "rector process --clear-cache",
     "rector:check": "rector process --clear-cache --dry-run",
     "security:audit": "composer audit",
     "validate:strict": "composer validate --strict",
-    "ci": "@validate:strict && @security:audit && @pint --test && @stan && @rector:check && @test",
+    "ci": "@validate:strict && @security:audit && @lint:workflows && @pint --test && @stan && @rector:check && @test",
     "bench": "php benchmarks/publish-throughput.php"
   },
   "config": {

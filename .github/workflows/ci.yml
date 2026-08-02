@@ -134,6 +134,11 @@ jobs:
       - name: Check code style
         run: composer pint -- --test
 
+      # An unparseable workflow makes GitHub fail the run in 0 seconds with no job logs,
+      # which is painful to diagnose. Catch it here — and locally via `composer lint`.
+      - name: Lint workflow YAML
+        run: composer lint:workflows
+
   static-analysis:
     runs-on: ubuntu-latest
     name: Static Analysis
@@ -224,8 +229,15 @@ jobs:
 
       # The examples used to require a gitignored config.php with no committed template,
       # so 17 of 20 fatally failed on a fresh clone.
+      # Block scalar, not a plain one: the PHP here contains ": " (from the ternary),
+      # which YAML would read as a mapping indicator and reject the whole file.
       - name: Examples must load their config on a fresh clone
-        run: php -r 'require "vendor/autoload.php"; $c = require "examples/config.php.dist"; exit(isset($c["host"]) ? 0 : 1);'
+        run: |
+          php -r '
+            require "vendor/autoload.php";
+            $c = require "examples/config.php.dist";
+            if (!isset($c["host"])) { fwrite(STDERR, "config.php.dist did not return a host\n"); exit(1); }
+            echo "config loads: {$c["host"]}:{$c["port"]}\n";'
 
   security-audit:
     runs-on: ubuntu-latest
