@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 use ScienceStories\Mqtt\Client\Client;
 use ScienceStories\Mqtt\Client\Options;
+use ScienceStories\Mqtt\Client\PublishOptions;
+use ScienceStories\Mqtt\Exception\Timeout;
+use ScienceStories\Mqtt\Protocol\MqttVersion;
 use ScienceStories\Mqtt\Protocol\Packet\PacketType;
+use ScienceStories\Mqtt\Protocol\QoS;
 use ScienceStories\Mqtt\Testing\InMemoryTransport;
 
 /**
@@ -136,7 +140,7 @@ describe('a missing PINGRESP is detected', function (): void {
 
         try {
             $client->ping(0.01);
-        } catch (ScienceStories\Mqtt\Exception\Timeout) {
+        } catch (Timeout) {
             // expected — nothing was fed
         }
 
@@ -192,7 +196,7 @@ describe('the broker can override Keep Alive', function (): void {
         $options = new Options(
             host: 'fake.broker',
             keepAlive: 600,
-            version: ScienceStories\Mqtt\Protocol\MqttVersion::V5_0,
+            version: MqttVersion::V5_0,
         );
         [$client, $transport] = keepAliveClient($options, $properties);
 
@@ -237,7 +241,7 @@ describe('flow control does not leak slots', function (): void {
 
         $options = new Options(
             host: 'fake.broker',
-            version: ScienceStories\Mqtt\Protocol\MqttVersion::V5_0,
+            version: MqttVersion::V5_0,
         )->withAckTimeout(0.1)->withMaxResendAttempts(0);
 
         [$client] = keepAliveClient($options, $properties);
@@ -248,10 +252,10 @@ describe('flow control does not leak slots', function (): void {
 
         // No PUBACK is ever fed, so this must time out.
         try {
-            $client->publish('a/b', 'x', new ScienceStories\Mqtt\Client\PublishOptions(
-                qos: ScienceStories\Mqtt\Protocol\QoS::AtLeastOnce,
+            $client->publish('a/b', 'x', new PublishOptions(
+                qos: QoS::AtLeastOnce,
             ));
-        } catch (ScienceStories\Mqtt\Exception\Timeout) {
+        } catch (Timeout) {
             // expected
         }
 

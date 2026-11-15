@@ -137,7 +137,7 @@ try {
     echo "✅ Disconnected successfully\n\n";
 } catch (Throwable $e) {
     fwrite(STDERR, "\n❌ MQTT 5.0 Error: ".$e->getMessage()."\n");
-    fwrite(STDERR, '   Error type: '.get_class($e)."\n\n");
+    fwrite(STDERR, '   Error type: '.$e::class."\n\n");
 }
 
 // ============================================================================
@@ -247,7 +247,7 @@ try {
     echo "✅ Disconnected successfully\n\n";
 } catch (Throwable $e) {
     fwrite(STDERR, "\n❌ MQTT 3.1.1 Error: ".$e->getMessage()."\n");
-    fwrite(STDERR, '   Error type: '.get_class($e)."\n\n");
+    fwrite(STDERR, '   Error type: '.$e::class."\n\n");
 }
 
 echo "═══════════════════════════════════════════════════════════════════════\n";

@@ -150,7 +150,7 @@ try {
     echo "Done.\n";
 } catch (Throwable $e) {
     fwrite(STDERR, "\nError: ".$e->getMessage()."\n");
-    fwrite(STDERR, '   Type: '.get_class($e)."\n");
+    fwrite(STDERR, '   Type: '.$e::class."\n");
     fwrite(STDERR, '   Trace: '.$e->getTraceAsString()."\n");
     exit(1);
 }

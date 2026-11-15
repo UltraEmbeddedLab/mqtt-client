@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use ScienceStories\Mqtt\Client\InboundMessage;
+
 /**
  * Benchmark: per-operation cost of two hot paths whose cost grows with payload size.
  *
@@ -56,7 +58,7 @@ foreach ([64, 16_384, 262_144, 1_048_576] as $size) {
         . Bytes::encodeVarInt(strlen($properties)) . $properties
         . str_repeat('p', $size);
     $iterations = max(20, intdiv(20_000_000, $size + 1_000));
-    report(number_format($size) . ' B payload', bestOf(static fn () => $decoder->decodePublish(0x02, $body), $iterations), $size);
+    report(number_format($size) . ' B payload', bestOf(static fn (): InboundMessage => $decoder->decodePublish(0x02, $body), $iterations), $size);
 }
 
 echo "\n--- WebSocket client frame (mask + header) ---\n";
@@ -65,5 +67,5 @@ $encode = new ReflectionMethod(WsTransport::class, 'encodeFrame');
 foreach ([64, 16_384, 262_144, 1_048_576] as $size) {
     $payload    = str_repeat('w', $size);
     $iterations = max(5, intdiv(2_000_000, $size + 1_000));
-    report(number_format($size) . ' B payload', bestOf(static fn () => $encode->invoke($ws, $payload, 0x02), $iterations), $size);
+    report(number_format($size) . ' B payload', bestOf(static fn (): mixed => $encode->invoke($ws, $payload, 0x02), $iterations), $size);
 }

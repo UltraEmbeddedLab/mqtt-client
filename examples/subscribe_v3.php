@@ -112,7 +112,7 @@ try {
 
     // Set up a message handler
     $messageCount = 0;
-    $client->onMessage(function ($message) use (&$messageCount) {
+    $client->onMessage(function ($message) use (&$messageCount): void {
         $messageCount++;
         echo "\n📬 Message #$messageCount received:\n";
         echo "   Topic: $message->topic\n";
@@ -140,6 +140,6 @@ try {
     echo "✅ Disconnected successfully\n";
 } catch (Throwable $e) {
     fwrite(STDERR, "\n❌ Error: ".$e->getMessage()."\n");
-    fwrite(STDERR, '   Error type: '.get_class($e)."\n");
+    fwrite(STDERR, '   Error type: '.$e::class."\n");
     exit(1);
 }

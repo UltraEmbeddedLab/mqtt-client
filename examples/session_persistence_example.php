@@ -3,9 +3,11 @@
 declare(strict_types=1);
 
 use ScienceStories\Mqtt\Client\Client;
+use ScienceStories\Mqtt\Client\InboundMessage;
 use ScienceStories\Mqtt\Client\Options;
 use ScienceStories\Mqtt\Protocol\MqttVersion;
 use ScienceStories\Mqtt\Session\FileSessionStore;
+use ScienceStories\Mqtt\Session\SessionState;
 use ScienceStories\Mqtt\Transport\TcpTransport;
 
 require __DIR__.'/../vendor/autoload.php';
@@ -55,7 +57,7 @@ echo "   Session Directory: $sessionDir\n\n";
 // Check if we have a saved session
 if ($sessionStore->exists($clientId)) {
     $state = $sessionStore->load($clientId);
-    if ($state !== null) {
+    if ($state instanceof SessionState) {
         echo "Found existing session for '$clientId':\n";
         echo "   Subscriptions: {$state->getSubscriptionCount()}\n";
         echo "   Age: {$state->getAge()} seconds\n";
@@ -136,7 +138,7 @@ try {
     $deadline = microtime(true) + 5.0;
     while (microtime(true) < $deadline) {
         $msg = $client->awaitMessage(0.5);
-        if ($msg !== null) {
+        if ($msg instanceof InboundMessage) {
             echo "   Received: $msg->topic -> $msg->payload\n";
         }
     }
@@ -149,7 +151,7 @@ try {
     // Verify session was saved
     if ($sessionStore->exists($clientId)) {
         $state = $sessionStore->load($clientId);
-        if ($state !== null) {
+        if ($state instanceof SessionState) {
             echo "\nSession saved successfully:\n";
             echo "   Subscriptions: {$state->getSubscriptionCount()}\n";
             foreach ($state->subscriptions as $filter => $settings) {
@@ -161,7 +163,7 @@ try {
     echo "\nDone. Run this example again to see the session restored.\n";
 } catch (Throwable $e) {
     fwrite(STDERR, "\nError: ".$e->getMessage()."\n");
-    fwrite(STDERR, '   Type: '.get_class($e)."\n");
+    fwrite(STDERR, '   Type: '.$e::class."\n");
     fwrite(STDERR, '   Trace: '.$e->getTraceAsString()."\n");
     exit(1);
 }

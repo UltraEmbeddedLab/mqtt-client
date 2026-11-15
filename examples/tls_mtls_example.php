@@ -118,6 +118,6 @@ try {
     echo "Disconnected.\n";
 } catch (Throwable $e) {
     fwrite(STDERR, "\nError: ".$e->getMessage()."\n");
-    fwrite(STDERR, 'Type:  '.get_class($e)."\n");
+    fwrite(STDERR, 'Type:  '.$e::class."\n");
     exit(1);
 }

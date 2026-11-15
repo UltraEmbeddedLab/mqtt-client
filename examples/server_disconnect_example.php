@@ -53,7 +53,7 @@ class SimpleEventDispatcher implements EventDispatcherInterface
 
     public function dispatch(object $event): object
     {
-        $eventClass = get_class($event);
+        $eventClass = $event::class;
         foreach ($this->listeners[$eventClass] ?? [] as $listener) {
             $listener($event);
             if ($event instanceof StoppableEventInterface && $event->isPropagationStopped()) {
@@ -84,7 +84,7 @@ $port = $config['port'] ?? (($config['scheme'] ?? 'tcp') === 'tls' ? 8883 : 1883
 // Create event dispatcher and register ServerDisconnect listener
 $eventDispatcher = new SimpleEventDispatcher();
 
-$eventDispatcher->addListener(ServerDisconnect::class, function (ServerDisconnect $event) {
+$eventDispatcher->addListener(ServerDisconnect::class, function (ServerDisconnect $event): void {
     $disconnect = $event->disconnect;
 
     echo "\n========================================\n";
@@ -200,15 +200,15 @@ try {
     echo "(Press Ctrl+C to stop)\n\n";
 
     // Set up message handler
-    $client->onMessage(function ($msg) {
+    $client->onMessage(function ($msg): void {
         echo "Received: $msg->topic -> $msg->payload\n";
     });
 
     // Run message loop
-    $client->run(fn ($msg) => null, idleSleep: 0.1);
+    $client->run(fn ($msg): null => null, idleSleep: 0.1);
 } catch (Throwable $e) {
     fwrite(STDERR, "\nError: ".$e->getMessage()."\n");
-    fwrite(STDERR, '   Type: '.get_class($e)."\n");
+    fwrite(STDERR, '   Type: '.$e::class."\n");
     fwrite(STDERR, '   Trace: '.$e->getTraceAsString()."\n");
     exit(1);
 }

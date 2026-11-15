@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use ScienceStories\Mqtt\Client\InboundMessage;
+use ScienceStories\Mqtt\Exception\MqttException;
 use ScienceStories\Mqtt\Exception\ProtocolError;
 use ScienceStories\Mqtt\Protocol\Packet\Connect;
 use ScienceStories\Mqtt\Protocol\V311\Decoder as V311Decoder;
@@ -108,6 +109,6 @@ describe('malformed inbound packets', function (): void {
             $thrown = $e;
         }
 
-        expect($thrown)->toBeInstanceOf(ScienceStories\Mqtt\Exception\MqttException::class);
+        expect($thrown)->toBeInstanceOf(MqttException::class);
     });
 });

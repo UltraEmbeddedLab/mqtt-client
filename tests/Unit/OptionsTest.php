@@ -3,6 +3,9 @@
 declare(strict_types=1);
 
 use ScienceStories\Mqtt\Client\Options;
+use ScienceStories\Mqtt\Client\SubscribeOptions;
+use ScienceStories\Mqtt\Client\TlsOptions;
+use ScienceStories\Mqtt\Client\WillOptions;
 use ScienceStories\Mqtt\Protocol\MqttVersion;
 
 test('Options can be created with default values', function (): void {
@@ -82,10 +85,10 @@ test('every with*() on the immutable options classes is #[NoDiscard]', function 
             ->toHaveCount(1, "$class::{$method->getName()}() is missing #[\NoDiscard]");
     }
 })->with([
-    ScienceStories\Mqtt\Client\Options::class,
-    ScienceStories\Mqtt\Client\TlsOptions::class,
-    ScienceStories\Mqtt\Client\SubscribeOptions::class,
-    ScienceStories\Mqtt\Client\WillOptions::class,
+    Options::class,
+    TlsOptions::class,
+    SubscribeOptions::class,
+    WillOptions::class,
 ]);
 
 test('clone-with withers leave the original untouched and copy every other field', function (): void {

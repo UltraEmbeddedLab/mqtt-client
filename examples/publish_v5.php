@@ -237,6 +237,6 @@ try {
     echo "✅ Disconnected successfully\n";
 } catch (Throwable $e) {
     fwrite(STDERR, "\n❌ Error: ".$e->getMessage()."\n");
-    fwrite(STDERR, '   Error type: '.get_class($e)."\n");
+    fwrite(STDERR, '   Error type: '.$e::class."\n");
     exit(1);
 }

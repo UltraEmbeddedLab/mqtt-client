@@ -7,6 +7,7 @@ use ScienceStories\Mqtt\Client\Client;
 use ScienceStories\Mqtt\Client\Options;
 use ScienceStories\Mqtt\Client\SubscribeOptions;
 use ScienceStories\Mqtt\Protocol\MqttVersion;
+use ScienceStories\Mqtt\Protocol\Packet\SubAck;
 use ScienceStories\Mqtt\Transport\TcpTransport;
 use ScienceStories\Mqtt\Util\RandomId;
 
@@ -97,7 +98,7 @@ try {
     echo "   Packet ID: $subResult->packetId\n";
     echo '   Return Codes: ['.implode(', ', $subResult->results)."]\n";
 
-    if ($subResult->subAck !== null) {
+    if ($subResult->subAck instanceof SubAck) {
         $subAck = $subResult->subAck;
         echo '   Overall Status: '.($subAck->isSuccess() ? '✅ All subscriptions successful' : '❌ Some subscriptions failed')."\n";
         echo '   Granted QoS Levels: ['.implode(', ', $subAck->getGrantedQoS())."]\n\n";
@@ -154,7 +155,7 @@ try {
         echo "   Packet ID: $subResult2->packetId\n";
         echo '   Return Code: 0x'.dechex($subResult2->results[0] ?? 0)."\n";
 
-        if ($subResult2->subAck !== null) {
+        if ($subResult2->subAck instanceof SubAck) {
             $subAck2 = $subResult2->subAck;
             $desc    = $subAck2->getReasonDescription($subResult2->results[0] ?? 0, $versionStr);
             echo "   Description: $desc\n";
@@ -167,6 +168,6 @@ try {
     echo "✅ Disconnected successfully\n";
 } catch (Throwable $e) {
     fwrite(STDERR, "\n❌ Error: ".$e->getMessage()."\n");
-    fwrite(STDERR, '   Error type: '.get_class($e)."\n");
+    fwrite(STDERR, '   Error type: '.$e::class."\n");
     exit(1);
 }

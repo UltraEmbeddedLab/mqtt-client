@@ -3,9 +3,11 @@
 declare(strict_types=1);
 
 use ScienceStories\Mqtt\Client\Client;
+use ScienceStories\Mqtt\Client\ConnectResult;
 use ScienceStories\Mqtt\Client\InboundMessage;
 use ScienceStories\Mqtt\Client\Options;
 use ScienceStories\Mqtt\Client\PublishOptions;
+use ScienceStories\Mqtt\Exception\ProtocolError;
 use ScienceStories\Mqtt\Exception\Timeout;
 use ScienceStories\Mqtt\Protocol\Packet\PacketType;
 use ScienceStories\Mqtt\Protocol\QoS;
@@ -300,7 +302,7 @@ describe('a failed connect()', function (): void {
         $transport = new InMemoryTransport();
         $client    = new Client(new Options(host: 'fake.broker', clientId: 'no-connack'), $transport);
 
-        expect(fn (): ScienceStories\Mqtt\Client\ConnectResult => $client->connect())->toThrow(Timeout::class)
+        expect(fn (): ConnectResult => $client->connect())->toThrow(Timeout::class)
             ->and($transport->isOpen())->toBeFalse();
     });
 
@@ -309,8 +311,8 @@ describe('a failed connect()', function (): void {
         $transport->feedPublish('a', 'b');
         $client = new Client(new Options(host: 'fake.broker', clientId: 'wrong-first'), $transport);
 
-        expect(fn (): ScienceStories\Mqtt\Client\ConnectResult => $client->connect())
-            ->toThrow(ScienceStories\Mqtt\Exception\ProtocolError::class, 'Expected CONNACK')
+        expect(fn (): ConnectResult => $client->connect())
+            ->toThrow(ProtocolError::class, 'Expected CONNACK')
             ->and($transport->isOpen())->toBeFalse();
     });
 });

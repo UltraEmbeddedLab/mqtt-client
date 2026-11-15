@@ -6,6 +6,7 @@ use Random\RandomException;
 use ScienceStories\Mqtt\Client\Client;
 use ScienceStories\Mqtt\Client\Options;
 use ScienceStories\Mqtt\Protocol\MqttVersion;
+use ScienceStories\Mqtt\Protocol\Packet\ConnAck;
 use ScienceStories\Mqtt\Transport\TcpTransport;
 use ScienceStories\Mqtt\Util\RandomId;
 
@@ -69,7 +70,7 @@ try {
     echo "   Reason Code: $result->reasonCode";
 
     // Use ConnAck's enhanced functionality to decode reason code
-    if ($result->connAck !== null) {
+    if ($result->connAck instanceof ConnAck) {
         $description = $result->connAck->getReasonDescription($result->version);
         echo " ($description)\n";
         echo '   Connection Status: '.($result->connAck->isSuccess() ? '✅ Success' : '❌ Failed')."\n";
@@ -151,6 +152,6 @@ try {
     echo "✅ Disconnected successfully\n";
 } catch (Throwable $e) {
     fwrite(STDERR, "\n❌ Connection failed: ".$e->getMessage()."\n");
-    fwrite(STDERR, '   Error type: '.get_class($e)."\n");
+    fwrite(STDERR, '   Error type: '.$e::class."\n");
     exit(1);
 }
