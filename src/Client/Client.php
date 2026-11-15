@@ -20,6 +20,7 @@ use ScienceStories\Mqtt\Events\MessageReceived as EvMessageReceived;
 use ScienceStories\Mqtt\Events\PacketReceived as EvPacketReceived;
 use ScienceStories\Mqtt\Events\PacketSent as EvPacketSent;
 use ScienceStories\Mqtt\Events\ServerDisconnect as EvServerDisconnect;
+use ScienceStories\Mqtt\Events\SubscriptionRefused as EvSubscriptionRefused;
 use ScienceStories\Mqtt\Exception\AuthenticationError;
 use ScienceStories\Mqtt\Exception\MqttException;
 use ScienceStories\Mqtt\Exception\ProtocolError;
@@ -50,9 +51,11 @@ use SplQueue;
 use Throwable;
 
 use function array_any;
+use function array_filter;
 use function array_key_exists;
 use function array_key_first;
 use function array_keys;
+use function array_values;
 use function bin2hex;
 use function chr;
 use function chunk_split;
@@ -69,6 +72,7 @@ use function mt_rand;
 use function ord;
 use function pack;
 use function round;
+use function sprintf;
 use function strlen;
 use function strtoupper;
 use function substr;
@@ -125,6 +129,26 @@ final class Client implements ClientInterface
 
     /** Set while attemptReconnect() runs, so a wait inside it cannot reconnect again. */
     private bool $reconnecting = false;
+
+    /**
+     * SubscriptionRefused events from the automatic resubscribe, held until it is over.
+     *
+     * Dispatched mid-resubscribe, a listener that threw was taken for a failed reconnect —
+     * leaving a live connection with the rest of the filters never sent — and one that
+     * subscribed to a fallback filter was not remembered, because the client was still
+     * flagged as resubscribing.
+     *
+     * @var list<EvSubscriptionRefused>
+     */
+    private array $deferredRefusals = [];
+
+    /**
+     * Whether the session store has been consulted. Only the first connection restores
+     * from it; after that the in-memory subscriptions are at least as fresh as anything
+     * stored, and restoring on every reconnect brought back filters the broker had refused
+     * and dropped ones subscribed since the last save.
+     */
+    private bool $sessionRestoreDone = false;
 
     /**
      * Acknowledgements for requests still being waited on, keyed by ackKey().
@@ -617,9 +641,11 @@ final class Client implements ClientInterface
 
         // Restore session state if session store is configured and session was present
         $clientId = $assignedId ?? $this->options->clientId;
-        if ($this->options->sessionStore instanceof SessionStoreInterface && $connack->sessionPresent && ! $this->options->cleanSession) {
+        if (! $this->sessionRestoreDone && $this->options->sessionStore instanceof SessionStoreInterface && $connack->sessionPresent && ! $this->options->cleanSession) {
             $this->restoreSession($clientId);
         }
+        // Whatever the first connection found, from here on memory is the newer record.
+        $this->sessionRestoreDone = true;
 
         $this->metrics?->increment('connections', 1.0, ['version' => $versionStr]);
         $this->metrics?->observe('connect_duration_seconds', Clock::now() - $connectStart);
@@ -1198,25 +1224,112 @@ final class Client implements ClientInterface
         $this->subscribeWith($filters);
     }
 
+    /**
+     * @param  non-empty-list<array{filter: string, qos: int}>  $filters
+     */
     public function subscribeWith(array $filters, ?SubscribeOptions $options = null): SubscribeResult
     {
+        // Exactly the filters that go on the wire, in order. The encoders skip empty ones, and
+        // the SUBACK carries one code per filter actually sent (MQTT-3.9.3-1) — matching codes
+        // against the list as given would shift every code after an empty filter.
+        $sent = array_values(array_filter($filters, static fn (array $f): bool => $f['filter'] !== ''));
+        if ($sent === []) {
+            // A SUBSCRIBE without a single filter is a protocol violation (MQTT-3.8.3-2): the
+            // broker would close the connection. As unsubscribe() does, send nothing.
+            $this->logger->debug('SUBSCRIBE skipped: no non-empty topic filter');
+
+            return new SubscribeResult(0, []);
+        }
+
         $pid  = RandomId::packetId();
-        $data = $this->encoder->encodeSubscribe($filters, $pid, $options);
-        $this->logger->debug('>> SUBSCRIBE', ['packetId' => $pid, 'filters' => $filters, 'bytes' => strlen($data), 'preview' => $this->hexPreview($data)]);
+        $data = $this->encoder->encodeSubscribe($sent, $pid, $options);
+        $this->logger->debug('>> SUBSCRIBE', ['packetId' => $pid, 'filters' => $sent, 'bytes' => strlen($data), 'preview' => $this->hexPreview($data)]);
         $this->trackWrite($data);
 
         // Retained messages may arrive before the SUBACK; awaitAck() delivers them as usual.
         $subAck = $this->awaitAck(PacketType::SUBACK, $pid, SubAck::class, 5.0, 'SUBACK');
-        $this->logger->info('SUBACK', ['packetId' => $pid, 'codes' => $subAck->returnCodes]);
-
-        // Record subscriptions if this is a user-initiated subscription (avoid duplicate records during resubscribe)
-        if (! $this->isResubscribing) {
-            $this->recordSubscriptionsFromFilters($filters, $options);
+        $codes  = $subAck->returnCodes;
+        $this->logger->info('SUBACK', ['packetId' => $pid, 'codes' => $codes]);
+        if (count($codes) !== count($sent)) {
+            $this->logger->warning('SUBACK code count does not match the filters sent; a missing code counts as refused', [
+                'filters' => count($sent),
+                'codes'   => count($codes),
+            ]);
         }
 
-        $this->metrics?->increment('subscriptions', (float) count($filters));
+        $granted = [];
+        $refused = [];
+        foreach ($sent as $i => $filter) {
+            $code = $codes[$i] ?? 0x80;
+            if ($code < 0x80) {
+                $granted[] = $filter;
+            } else {
+                $refused[] = [$filter['filter'], $code];
+            }
+        }
 
-        return new SubscribeResult($pid, $subAck->returnCodes, $subAck);
+        // Every state change first, events last: a listener may throw, or subscribe and
+        // unsubscribe itself, and must find the bookkeeping already settled.
+
+        // Only granted filters are remembered for resubscription — with the QoS that was
+        // *requested*. A broker may grant less (its Maximum QoS); asking again for what the
+        // application wanted, not what one broker allowed, keeps that intent across a
+        // reconnect to a broker that can do more. The granted levels are in the result.
+        if (! $this->isResubscribing) {
+            $this->recordSubscriptionsFromFilters($granted, $options);
+        }
+        foreach ($refused as [$filter, $code]) {
+            $this->noteRefusal($filter, $code, $subAck);
+        }
+        $this->metrics?->increment('subscriptions', (float) count($granted));
+
+        foreach ($refused as [$filter, $code]) {
+            $event = new EvSubscriptionRefused($filter, $code, $this->isResubscribing);
+            if ($this->isResubscribing) {
+                $this->deferredRefusals[] = $event;
+            } else {
+                $this->events?->dispatch($event);
+            }
+        }
+
+        return new SubscribeResult($pid, $codes, $subAck);
+    }
+
+    /**
+     * The broker said no to one filter: record it, and stop asserting it.
+     *
+     * A refused filter used to be remembered like a granted one, so every reconnect asked
+     * for it again — and through `subscribe()`, which returns nothing, the application had
+     * no sign that messages would never arrive.
+     *
+     * Refused during the automatic resubscribe, the broker no longer accepts a filter the
+     * client was holding, so it is forgotten. Refused on the application's own call, any
+     * earlier subscription to the same filter is left alone: a refused replacement does not
+     * remove the subscription the broker already has, and a filter never granted was never
+     * remembered in the first place.
+     */
+    private function noteRefusal(string $filter, int $code, SubAck $subAck): void
+    {
+        if ($this->isResubscribing) {
+            unset($this->subscriptions[$filter]);
+        }
+        $this->logger->warning('Subscription refused by the broker', [
+            'filter'        => $filter,
+            'reasonCode'    => sprintf('0x%02X', $code),
+            'reason'        => $subAck->getReasonDescription($code, $this->options->version),
+            'resubscribing' => $this->isResubscribing,
+        ]);
+        $this->metrics?->increment('subscriptions_refused', 1.0, ['reason' => $code]);
+    }
+
+    /** Report what the automatic resubscribe was refused, now that it is over. */
+    private function dispatchDeferredRefusals(): void
+    {
+        $refusals               = $this->deferredRefusals;
+        $this->deferredRefusals = [];
+        foreach ($refusals as $event) {
+            $this->events?->dispatch($event);
+        }
     }
 
     public function unsubscribe(array $topics): void
@@ -1611,7 +1724,23 @@ final class Client implements ClientInterface
         }
 
         $this->reconnecting = true;
+        try {
+            $reconnected = $this->reconnectOnce();
+        } finally {
+            $this->reconnecting = false;
+        }
 
+        // The resubscribe is over and every flag reset: a listener may now subscribe again
+        // and be remembered, and an exception it throws reaches the application (PSR-14)
+        // instead of being mistaken for a failed reconnect.
+        $this->dispatchDeferredRefusals();
+
+        return $reconnected;
+    }
+
+    /** One reconnect attempt: connect, then resubscribe. Failure is counted, not thrown. */
+    private function reconnectOnce(): bool
+    {
         try {
             $this->logger->info('Attempting reconnect', ['attempt' => $this->reconnectAttempts + 1]);
             $this->metrics?->increment('reconnect_attempts');
@@ -1636,12 +1765,14 @@ final class Client implements ClientInterface
 
             return true;
         } catch (Throwable $e) {
+            // A connection that came up but could not be fully resubscribed — a SUBACK that
+            // never came — is not one to keep: left open, loopOnce() would never reconnect,
+            // and the filters not yet sent would stay unsubscribed on a live connection.
+            $this->transport->close();
             $this->reconnectAttempts++;
             $this->logger->warning('Reconnect failed', ['error' => $e->getMessage(), 'attempts' => $this->reconnectAttempts]);
 
             return false;
-        } finally {
-            $this->reconnecting = false;
         }
     }
 
@@ -1778,15 +1909,15 @@ final class Client implements ClientInterface
         ));
         $this->metrics?->increment('protocol_violations', 1.0, ['reason' => $reason->value]);
 
-        if ($willReconnect) {
-            return null;
+        if (! $willReconnect) {
+            // As for an inbound DISCONNECT: nothing will re-establish this connection, so
+            // run()/messages() stop instead of spinning on a closed transport.
+            $this->shouldStop = true;
+
+            throw new ProtocolError($message, $reason->value);
         }
 
-        // As for an inbound DISCONNECT: nothing will re-establish this connection, so
-        // run()/messages() stop instead of spinning on a closed transport.
-        $this->shouldStop = true;
-
-        throw new ProtocolError($message, $reason->value);
+        return null;
     }
 
     private function deliverIfMatches(InboundMessage $msg): void

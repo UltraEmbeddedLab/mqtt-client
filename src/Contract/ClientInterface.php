@@ -26,10 +26,26 @@ interface ClientInterface
      */
     public function ping(?float $timeoutSec = 5.0): bool;
 
-    /** @param non-empty-list<string> $topics */
+    /**
+     * Subscribe to topic filters at one QoS.
+     *
+     * A filter the broker refuses in its SUBACK is not remembered for resubscription after a
+     * reconnect; an `Events\SubscriptionRefused` is dispatched for it. Use subscribeWith() to
+     * get the SUBACK codes back.
+     *
+     * @param non-empty-list<string> $topics
+     */
     public function subscribe(array $topics, int $qos = 0): void;
 
     /**
+     * Subscribe to topic filters, each with its own QoS, and return the SUBACK codes.
+     *
+     * Codes are in the order of the filters sent; empty filters are never sent. A refused
+     * filter (code 0x80 or above) is not remembered for resubscription — an earlier grant of
+     * the same filter is kept — and dispatches an `Events\SubscriptionRefused`. A granted one
+     * is resubscribed after a reconnect with the QoS requested here, not the possibly lower
+     * one the broker granted.
+     *
      * @param  non-empty-list<array{filter:string,qos:int}>  $filters
      */
     public function subscribeWith(array $filters, ?SubscribeOptions $options = null): SubscribeResult;

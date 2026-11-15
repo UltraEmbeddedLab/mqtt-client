@@ -28,9 +28,10 @@ Defects a first user would hit. All fixable without changing a signature.
 
 - ~~**Resolve inbound topic aliases.**~~ Done — in their own map, apart from outbound
   aliases, with the receiver's protocol checks (see `[Unreleased]` in the changelog).
-- **Stop re-subscribing to filters the broker refused**, and record the granted QoS rather
-  than the requested one. `subscribeWith()` already returns the SUBACK codes; `subscribe()`
-  discards them, so a refused filter is retried on every reconnect.
+- ~~**Stop re-subscribing to filters the broker refused.**~~ Done, with an
+  `Events\SubscriptionRefused`. The resubscribe deliberately asks again for the *requested*
+  QoS, not the granted one: re-requesting what one broker allowed would lose the
+  application's intent across a failover to a broker that supports more.
 - **A conforming QoS 2 sender.** After PUBREC the client must retransmit PUBREL, not the
   PUBLISH, and must not send PUBREL at all when PUBREC carries an error code (MQTT-4.3.3).
 - **Enforce broker-advertised limits** — Maximum QoS, Retain Available, Maximum Packet Size.

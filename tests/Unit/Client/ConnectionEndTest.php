@@ -6,7 +6,6 @@ use Psr\EventDispatcher\EventDispatcherInterface;
 use ScienceStories\Mqtt\Client\Client;
 use ScienceStories\Mqtt\Client\Options;
 use ScienceStories\Mqtt\Client\PublishOptions;
-use ScienceStories\Mqtt\Contract\TransportInterface;
 use ScienceStories\Mqtt\Events\PacketSent;
 use ScienceStories\Mqtt\Events\ServerDisconnect;
 use ScienceStories\Mqtt\Exception\ProtocolError;
@@ -16,6 +15,7 @@ use ScienceStories\Mqtt\Protocol\MqttVersion;
 use ScienceStories\Mqtt\Protocol\Packet\PacketType;
 use ScienceStories\Mqtt\Protocol\QoS;
 use ScienceStories\Mqtt\Testing\InMemoryTransport;
+use ScienceStories\Mqtt\Tests\Support\FailingWrites;
 use ScienceStories\Mqtt\Util\Bytes;
 use ScienceStories\Mqtt\Util\RandomId;
 
@@ -72,48 +72,8 @@ describe('draining the offline queue', function (): void {
 
     it('keeps a message that never reached the wire, at the head, for the next connection', function (): void {
         $inner     = new InMemoryTransport();
-        $transport = new class ($inner) implements TransportInterface {
-            public int $writesBeforeFailure = PHP_INT_MAX;
-
-            public function __construct(private readonly InMemoryTransport $inner)
-            {
-            }
-
-            public function open(string $host, int $port, float $timeoutSec = 5.0): void
-            {
-                $this->inner->open($host, $port, $timeoutSec);
-            }
-
-            public function write(string $bytes): int
-            {
-                if ($this->writesBeforeFailure-- <= 0) {
-                    throw new TransportError('Connection reset');
-                }
-
-                return $this->inner->write($bytes);
-            }
-
-            public function readExact(int $length, ?float $timeoutSec = null): string
-            {
-                return $this->inner->readExact($length, $timeoutSec);
-            }
-
-            public function close(): void
-            {
-                $this->inner->close();
-            }
-
-            public function isOpen(): bool
-            {
-                return $this->inner->isOpen();
-            }
-
-            public function enableTls(?array $tlsOptions = null): void
-            {
-                $this->inner->enableTls($tlsOptions);
-            }
-        };
-        $client = new Client(new Options(host: 'fake.broker', clientId: 'drain')->withOfflineQueue(10), $transport);
+        $transport = new FailingWrites($inner);
+        $client    = new Client(new Options(host: 'fake.broker', clientId: 'drain')->withOfflineQueue(10), $transport);
         $client->publish('first', '1');
         $client->publish('second', '2');
 
@@ -179,9 +139,8 @@ describe('when the client closes the connection itself', function (): void {
         $transport->takeWritten();
 
         $transport->feedPublish('t', 'x', properties: Bytes::encodeVarInt(3)."\x23".pack('n', 9));
-        expect(fn (): bool => $client->loopOnce(0.0))->toThrow(ProtocolError::class);
-
-        expect($transport->sentPacketTypes())->toBe([PacketType::DISCONNECT->value])
+        expect(fn (): bool => $client->loopOnce(0.0))->toThrow(ProtocolError::class)
+            ->and($transport->sentPacketTypes())->toBe([PacketType::DISCONNECT->value])
             ->and($seen)->toHaveCount(1)
             ->and($seen[0]->disconnect->properties['reason_string'] ?? '')->toStartWith('Closed by the client');
     });

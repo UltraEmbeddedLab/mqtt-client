@@ -394,9 +394,11 @@ Stated up front rather than discovered in production:
 - **`wss://` does not work.** `WsTransport` performs the HTTP upgrade before TLS can be
   enabled, so only `ws://` completes a handshake. `ws://` itself — masking, fragmented
   messages, ping/pong — is unit-tested and verified against Mosquitto 2.0.
-- **Acknowledgement reason codes are not acted on.** A PUBACK or SUBACK carrying a failure
-  code is logged, not raised — a rejected subscription looks successful. `subscribeWith()`
-  returns the codes in its `SubscribeResult`; `subscribe()` does not.
+- **A refused subscription is reported, not raised.** The client stops resubscribing to a
+  filter the broker refused and dispatches `Events\SubscriptionRefused`; `subscribeWith()`
+  also returns the codes. But `subscribe()` returns normally either way — making it throw
+  changes its contract and is planned for 3.0. PUBACK and PUBCOMP failure codes are still
+  only logged: a publish the broker rejected returns its packet identifier as if delivered.
 - **QoS 2 retransmission is not yet conforming.** Once PUBREC has arrived only PUBREL may
   be sent again, but if PUBCOMP is late the client resends the PUBLISH (with DUP) instead.
 - **Broker-advertised limits are not enforced.** Maximum QoS, Retain Available and Maximum
