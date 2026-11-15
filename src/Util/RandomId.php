@@ -7,10 +7,8 @@ namespace ScienceStories\Mqtt\Util;
 use InvalidArgumentException;
 use Random\RandomException;
 
-use function base64_encode;
-use function preg_replace;
-use function random_bytes;
-use function substr;
+use function random_int;
+use function strlen;
 
 /**
  * RandomId generates unique MQTT identifiers.
@@ -19,10 +17,17 @@ use function substr;
  */
 final class RandomId
 {
+    /** Characters every broker accepts in a Client Identifier (MQTT-3.1.3-5). */
+    private const string CLIENT_ID_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+
     private static int $packetIdCounter = 1;
 
     /**
-     * Generate a random client ID.
+     * Generate a random client ID of exactly $length alphanumeric characters.
+     *
+     * Each character is drawn uniformly from [A-Za-z0-9]. The previous implementation
+     * base64-encoded random bytes, stripped `+`, `/` and `=`, then truncated — so it could
+     * return fewer characters than asked for (about 0.15% of 6-character IDs).
      *
      * @param  int  $length  Length of the ID (default: 16)
      *
@@ -33,14 +38,14 @@ final class RandomId
         if ($length < 1) {
             throw new InvalidArgumentException('Client ID length must be >= 1');
         }
-        $bytes = random_bytes($length);
 
-        // Convert bytes to safe alphanumeric
-        $base  = base64_encode($bytes);
-        $clean = preg_replace('/[^a-zA-Z0-9]/', '', $base);
-        $clean ??= '';
+        $last = strlen(self::CLIENT_ID_ALPHABET) - 1;
+        $id   = '';
+        for ($i = 0; $i < $length; $i++) {
+            $id .= self::CLIENT_ID_ALPHABET[random_int(0, $last)];
+        }
 
-        return substr($clean, 0, $length);
+        return $id;
     }
 
     /**

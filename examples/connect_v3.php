@@ -7,6 +7,7 @@ use ScienceStories\Mqtt\Client\Client;
 use ScienceStories\Mqtt\Client\Options;
 use ScienceStories\Mqtt\Protocol\MqttVersion;
 use ScienceStories\Mqtt\Transport\TcpTransport;
+use ScienceStories\Mqtt\Util\RandomId;
 
 require __DIR__.'/../vendor/autoload.php';
 
@@ -19,7 +20,7 @@ $config     = require $configFile;
 // Setup client ID
 $clientId = 'php-iot-v3-fallback';
 try {
-    $clientId = 'php-iot-v3-khN7VA';
+    $clientId = 'php-iot-v3-'.RandomId::clientId(6);
 } catch (RandomException $e) {
     // Keep fallback client ID
 }

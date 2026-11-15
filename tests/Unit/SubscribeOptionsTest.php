@@ -24,9 +24,9 @@ test('retainAsPublished flag', function (): void {
 });
 
 test('retainHandling values (0, 1, 2)', function (): void {
-    expect((new SubscribeOptions(retainHandling: 0))->retainHandling)->toBe(0)
-        ->and((new SubscribeOptions(retainHandling: 1))->retainHandling)->toBe(1)
-        ->and((new SubscribeOptions(retainHandling: 2))->retainHandling)->toBe(2);
+    expect(new SubscribeOptions(retainHandling: 0)->retainHandling)->toBe(0)
+        ->and(new SubscribeOptions(retainHandling: 1)->retainHandling)->toBe(1)
+        ->and(new SubscribeOptions(retainHandling: 2)->retainHandling)->toBe(2);
 });
 
 test('properties stored', function (): void {

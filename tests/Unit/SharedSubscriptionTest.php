@@ -16,15 +16,15 @@ test('filter with simple topic', function (): void {
 
 test('filter throws for empty share name', function (): void {
     SharedSubscription::filter('', 'sensors/temp');
-})->throws(\InvalidArgumentException::class, 'Share name must not be empty');
+})->throws(InvalidArgumentException::class, 'Share name must not be empty');
 
 test('filter throws for share name containing slash', function (): void {
     SharedSubscription::filter('my/group', 'sensors/temp');
-})->throws(\InvalidArgumentException::class, 'Share name must not contain "/"');
+})->throws(InvalidArgumentException::class, 'Share name must not contain "/"');
 
 test('filter throws for empty topic filter', function (): void {
     SharedSubscription::filter('group', '');
-})->throws(\InvalidArgumentException::class, 'Topic filter must not be empty');
+})->throws(InvalidArgumentException::class, 'Topic filter must not be empty');
 
 test('isShared returns true for shared subscription', function (): void {
     expect(SharedSubscription::isShared('$share/group/sensors/temp'))->toBeTrue();

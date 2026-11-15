@@ -92,8 +92,12 @@ describe('TcpTransport timeouts', function (): void {
         [$transport, $peer] = tcpPair();
 
         $start = hrtime(true);
-        expect(fn (): string => $transport->readExact(1, 0.0))->toThrow(Timeout::class);
-        expect((hrtime(true) - $start) / 1e9)->toBeLessThan(0.5);
+        expect(fn (): string => $transport->readExact(1, 0.0))->toThrow(Timeout::class)
+            ->and((hrtime(true) - $start) / 1e9)->toBeLessThan(0.5);
+
+        // Closed only now: had the peer gone away first, the poll would rightly have
+        // reported EOF as a TransportError instead of a Timeout.
+        fclose($peer);
     });
 
     it('blocks without a timeout until the data is there', function (): void {

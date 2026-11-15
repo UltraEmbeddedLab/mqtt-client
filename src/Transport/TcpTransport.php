@@ -20,7 +20,6 @@ use function is_string;
 use function max;
 use function sprintf;
 use function stream_context_create;
-use function stream_select;
 use function stream_set_blocking;
 use function stream_set_chunk_size;
 use function stream_set_timeout;
@@ -31,6 +30,8 @@ use function usleep;
 
 final class TcpTransport implements TransportInterface
 {
+    use AwaitsReadable;
+
     /** Owns $context and $tlsEnabled, and the whole TLS upgrade. */
     use NegotiatesTls;
 
@@ -224,38 +225,6 @@ final class TcpTransport implements TransportInterface
             }
 
             $this->buffer .= $chunk;
-        }
-    }
-
-    /**
-     * Wait until the stream is readable or the deadline passes.
-     *
-     * Polls at least once even when the deadline has already passed, which is what makes a
-     * zero timeout a poll rather than an instant failure.
-     *
-     * @param  resource  $stream
-     *
-     * @throws Timeout
-     */
-    private function awaitReadable($stream, ?float $deadline): void
-    {
-        $sec  = null;
-        $usec = 0;
-        if ($deadline !== null) {
-            $timeLeft = max(0.0, $deadline - Clock::now());
-            $sec      = (int) floor($timeLeft);
-            $usec     = (int) floor(($timeLeft - $sec) * 1_000_000);
-        }
-
-        $r = [$stream];
-        $w = null;
-        $e = null;
-        $n = @stream_select($r, $w, $e, $sec, $usec);
-        if ($n === false) {
-            throw new TransportError('stream_select failed');
-        }
-        if ($n === 0) {
-            throw new Timeout('Read timed out');
         }
     }
 

@@ -498,17 +498,19 @@ final class Client implements ClientInterface
         $this->logger->info('Opening connection', ['host' => $this->options->host, 'port' => $this->options->port]);
         $this->transport->open($this->options->host, $this->options->port);
 
+        $connack = null;
         try {
             $connack = $this->handshake();
-        } catch (Throwable $e) {
+        } finally {
             // Whatever failed after open() — TLS, a timeout waiting for CONNACK, a malformed
             // or refused one — must not leave a half-open transport behind. isOpen() would
             // stay true, so auto-reconnect would never retry, and the next loopOnce() would
-            // treat whatever the broker sent next as traffic on a live session.
-            $this->transport->close();
-            $this->resetFrameState();
-
-            throw $e;
+            // treat whatever the broker sent next as traffic on a live session. A finally
+            // rather than catch-and-rethrow: every exception propagates untouched.
+            if (! $connack instanceof ConnAck) {
+                $this->transport->close();
+                $this->resetFrameState();
+            }
         }
         $versionStr = $this->options->version->value;
 
@@ -1023,7 +1025,7 @@ final class Client implements ClientInterface
      *
      * @throws Timeout once the wait expires and $onExpiry declines to retry
      */
-    private function awaitAck(PacketType $type, int $packetId, string $class, float $timeout, string $what, ?Closure $onExpiry = null): object
+    private function awaitAck(PacketType $type, int $packetId, string $class, float $timeout, string $what, ?Closure $onExpiry = null): PubAck|PubComp|SubAck|UnsubAck
     {
         $key              = $this->ackKey($type, $packetId);
         $this->acks[$key] = null;

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use ScienceStories\Mqtt\Client\InboundMessage;
 use ScienceStories\Mqtt\Exception\ProtocolError;
 use ScienceStories\Mqtt\Protocol\Packet\Connect;
 use ScienceStories\Mqtt\Protocol\V311\Decoder as V311Decoder;
@@ -85,7 +86,7 @@ describe('malformed inbound packets', function (): void {
         $decoder = new V311Decoder();
         $body    = pack('n', 3) . 'a/b' . 'x';
 
-        expect(fn (): mixed => $decoder->decodePublish(0x06, $body))
+        expect(fn (): InboundMessage => $decoder->decodePublish(0x06, $body))
             ->toThrow(ProtocolError::class);
     });
 
@@ -93,7 +94,7 @@ describe('malformed inbound packets', function (): void {
         $decoder = new V5Decoder();
         $body    = pack('n', 3) . 'a/b' . "\x00" . 'x';
 
-        expect(fn (): mixed => $decoder->decodePublish(0x06, $body))
+        expect(fn (): InboundMessage => $decoder->decodePublish(0x06, $body))
             ->toThrow(ProtocolError::class);
     });
 

@@ -16,7 +16,7 @@ use ScienceStories\Mqtt\Transport\WsTransport;
 function wsPair(): array
 {
     $loopback = Loopback::listener();
-    $client   = stream_socket_client("tcp://{$loopback->host}:{$loopback->port}", $errno, $errstr, 5);
+    $client   = stream_socket_client("tcp://$loopback->host:$loopback->port", $errno, $errstr, 5);
     if ($client === false) {
         throw new RuntimeException($errstr);
     }

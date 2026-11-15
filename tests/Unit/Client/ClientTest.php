@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use ScienceStories\Mqtt\Client\Client;
+use ScienceStories\Mqtt\Client\ConnectResult;
 use ScienceStories\Mqtt\Client\InboundMessage;
 use ScienceStories\Mqtt\Client\Options;
 use ScienceStories\Mqtt\Exception\AuthenticationError;
@@ -99,12 +100,12 @@ describe('acknowledgement registers', function (): void {
         RandomId::resetPacketId();
         [$client, $transport] = connectedClient();
 
-        $transport->feedSubAck(1, [0]);
+        $transport->feedSubAck(1);
         $client->subscribeWith([['filter' => 'a/#', 'qos' => 0]]);
 
         // A retained PUBLISH lands before the second SUBACK.
         $transport->feedPublish('a/x', 'interleaved');
-        $transport->feedSubAck(2, [0]);
+        $transport->feedSubAck(2);
 
         $result = $client->subscribeWith([['filter' => 'b/#', 'qos' => 0]]);
 
@@ -218,7 +219,7 @@ describe('inbound QoS 2 across a reconnect', function (): void {
         // On reconnect the broker reports the session is still present and, per §4.3.3,
         // replays only the PUBREL — never the PUBLISH. MQTT-4.1.0-1 makes the stored
         // message Session state, so it must have survived.
-        $transport->feedConnAck(0, sessionPresent: true);
+        $transport->feedConnAck(sessionPresent: true);
         $client->connect();
         $transport->feedPubRel(42);
         drain($client);
@@ -238,7 +239,7 @@ describe('inbound QoS 2 across a reconnect', function (): void {
         $transport->feedPublish('a/b', 'orphan', QoS::ExactlyOnce, 42);
         drain($client);
 
-        $transport->feedConnAck(0, sessionPresent: false);
+        $transport->feedConnAck();
         $client->connect();
         $transport->feedPubRel(42);
         drain($client);
@@ -253,7 +254,7 @@ describe('CONNACK handling', function (): void {
         $transport->feedConnAck(5);
         $client = new Client(new Options(host: 'fake.broker'), $transport);
 
-        expect(fn (): mixed => $client->connect())->toThrow(AuthenticationError::class);
+        expect(fn (): ConnectResult => $client->connect())->toThrow(AuthenticationError::class);
     });
 
     it('throws ServerError when 3.1.1 refuses with "server unavailable"', function (): void {
@@ -261,7 +262,7 @@ describe('CONNACK handling', function (): void {
         $transport->feedConnAck(3);
         $client = new Client(new Options(host: 'fake.broker'), $transport);
 
-        expect(fn (): mixed => $client->connect())->toThrow(ServerError::class);
+        expect(fn (): ConnectResult => $client->connect())->toThrow(ServerError::class);
     });
 
     it('throws AuthenticationError when MQTT 5 refuses with 0x87', function (): void {
@@ -272,7 +273,7 @@ describe('CONNACK handling', function (): void {
             $transport,
         );
 
-        expect(fn (): mixed => $client->connect())->toThrow(AuthenticationError::class);
+        expect(fn (): ConnectResult => $client->connect())->toThrow(AuthenticationError::class);
     });
 
     it('closes the transport when the broker refuses the connection', function (): void {
@@ -303,7 +304,7 @@ describe('maximum packet size', function (): void {
         $transport->feed("\x20\xFF\xFF\xFF\x7F");
         $client = new Client(new Options(host: 'fake.broker'), $transport);
 
-        expect(fn (): mixed => $client->connect())->toThrow(ProtocolError::class);
+        expect(fn (): ConnectResult => $client->connect())->toThrow(ProtocolError::class);
     });
 
     it('rejects an oversized PUBLISH before allocating, without breaking loopOnce()', function (): void {
@@ -348,7 +349,7 @@ describe('maximum packet size', function (): void {
 
     it('advertises Maximum Packet Size in an MQTT 5 CONNECT', function (): void {
         $transport = new InMemoryTransport();
-        $transport->feedConnAck(0, properties: "\x00");
+        $transport->feedConnAck(properties: "\x00");
         $options = new Options(host: 'fake.broker', version: MqttVersion::V5_0)
             ->withMaximumPacketSize(65536);
 

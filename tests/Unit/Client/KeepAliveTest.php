@@ -13,7 +13,7 @@ use ScienceStories\Mqtt\Testing\InMemoryTransport;
 function keepAliveClient(Options $options, string $connAckProperties = ''): array
 {
     $transport = new InMemoryTransport();
-    $transport->feedConnAck(0, properties: $connAckProperties);
+    $transport->feedConnAck(properties: $connAckProperties);
 
     $client = new Client($options, $transport);
     $client->connect();

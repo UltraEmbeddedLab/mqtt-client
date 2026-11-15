@@ -205,8 +205,8 @@ describe('Keep Alive while blocked in a read', function (): void {
         new ReflectionProperty(Client::class, 'lastSent')->setValue($client, hrtime(true) / 1e9 - 1.7);
 
         $start = hrtime(true);
-        expect($client->loopOnce(null))->toBeFalse();
-        expect((hrtime(true) - $start) / 1e9)->toBeLessThan(1.0);
+        expect($client->loopOnce(null))->toBeFalse()
+            ->and((hrtime(true) - $start) / 1e9)->toBeLessThan(1.0);
 
         $client->loopOnce(0.0);
         usleep(20_000);
@@ -286,9 +286,8 @@ describe('ping() owns its own deadline', function (): void {
         );
 
         $start = hrtime(true);
-        expect(fn (): bool => $client->ping(0.15))->toThrow(Timeout::class);
-
-        expect((hrtime(true) - $start) / 1e9)->toBeGreaterThanOrEqual(0.15)
+        expect(fn (): bool => $client->ping(0.15))->toThrow(Timeout::class)
+            ->and((hrtime(true) - $start) / 1e9)->toBeGreaterThanOrEqual(0.15)
             ->and($transport->isOpen())->toBeTrue()
             ->and(new ReflectionProperty(Client::class, 'shouldStop')->getValue($client))->toBeFalse();
     });

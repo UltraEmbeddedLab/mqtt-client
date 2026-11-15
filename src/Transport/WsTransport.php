@@ -32,7 +32,6 @@ use function sprintf;
 use function str_contains;
 use function str_repeat;
 use function stream_context_create;
-use function stream_select;
 use function stream_set_blocking;
 use function stream_set_timeout;
 use function stream_socket_client;
@@ -59,6 +58,8 @@ use function usleep;
  */
 final class WsTransport implements TransportInterface
 {
+    use AwaitsReadable;
+
     /** Owns $context and $tlsEnabled, and the whole TLS upgrade. */
     use NegotiatesTls;
     /**
@@ -499,25 +500,7 @@ final class WsTransport implements TransportInterface
         }
 
         while (strlen($this->rawBuffer) < $length) {
-            // Poll at least once even past the deadline, so a zero timeout returns data
-            // that is already waiting instead of failing outright.
-            $sec  = null;
-            $usec = 0;
-            if ($deadline !== null) {
-                $timeLeft = max(0.0, $deadline - Clock::now());
-                $sec      = (int) floor($timeLeft);
-                $usec     = (int) floor(($timeLeft - $sec) * 1_000_000);
-            }
-            $r = [$stream];
-            $w = null;
-            $e = null;
-            $n = @stream_select($r, $w, $e, $sec, $usec);
-            if ($n === false) {
-                throw new TransportError('stream_select failed');
-            }
-            if ($n === 0) {
-                throw new Timeout('WebSocket: Read timed out');
-            }
+            $this->awaitReadable($stream, $deadline, 'WebSocket: ');
 
             $chunk = @fread($stream, max($length - strlen($this->rawBuffer), 65_536));
             if ($chunk === false) {

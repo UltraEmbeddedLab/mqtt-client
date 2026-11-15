@@ -72,7 +72,8 @@ function runOnce($server, bool $v5, int $qos, int $payloadSize, int $count): flo
     // largest one. ext-sockets is optional here, as it is for the library.
     if (function_exists('socket_import_stream')) {
         $sock = socket_import_stream($peer);
-        if ($sock !== false && $sock !== null) {
+        if ($sock !== false) {
+            /** @noinspection PhpComposerExtensionStubsInspection — optional, guarded above; requiring it would bring back the phantom ext-sockets dependency 2.0 removed */
             socket_set_option($sock, SOL_SOCKET, SO_SNDBUF, 8 * 1_048_576);
         }
     }
@@ -108,14 +109,15 @@ function runOnce($server, bool $v5, int $qos, int $payloadSize, int $count): flo
             if ($written === false || $written === 0) {
                 break;
             }
-            $pending = (string) substr($pending, $written);
+            $pending = substr($pending, $written);
             if ($pending === '') {
                 $sent++;
             }
         }
         // Drain whatever the client wrote back (PUBACKs) so its writes never block.
-        while (($ack = @fread($peer, 65536)) !== false && $ack !== '') {
-        }
+        do {
+            $ack = @fread($peer, 65536);
+        } while ($ack !== false && $ack !== '');
 
         if ($sent === $received) {
             throw new RuntimeException('the socket buffer cannot hold one packet; enable ext-sockets or shrink the payload');

@@ -11,8 +11,20 @@ beforeEach(function (): void {
 });
 
 test('clientId generates string of requested length', function (): void {
-    $id = RandomId::clientId(16);
-    expect(strlen($id))->toBe(16);
+    // Not the default of 16, or a length argument that was ignored would still pass.
+    $id = RandomId::clientId(24);
+    expect(strlen($id))->toBe(24);
+});
+
+test('clientId never returns fewer characters than requested', function (): void {
+    // Stripping base64's +, / and = used to shorten about 0.15% of 6-character IDs.
+    foreach ([1, 2, 3, 6, 16] as $length) {
+        for ($i = 0; $i < 2_000; $i++) {
+            $id = RandomId::clientId($length);
+            expect(strlen($id))->toBe($length)
+                ->and(ctype_alnum($id))->toBeTrue();
+        }
+    }
 });
 
 test('clientId with length 1', function (): void {
