@@ -15,15 +15,16 @@ All five landed; see the `[Unreleased]` section of the CHANGELOG.
 - ~~A monotonic clock~~ — `Util\Clock::now()` over `hrtime()`, everywhere
 - ~~Release the flow-control slot on a failed publish~~ — `awaitPublishAck()` + try/finally
 
-Still open in this area, and the biggest remaining structural item:
+## 2.1 — PHP 8.5 and the receive path ✅ done, unreleased
 
-- **A read buffer** (`Protocol\PacketReader`). A frame is read in three or more separate
-  socket calls with no buffer behind them, each restarting the timeout, so a mid-frame
-  timeout desynchronises the stream permanently and every later frame boundary is wrong.
-  This is also the prerequisite for the async work below.
-- **`tick()` cannot read a byte.** `loopOnce(0.0)` reaches `readExact(n, 0.0)`, whose
-  deadline has already expired before `stream_select()` is called. The documented
-  non-blocking integration path silently delivers nothing.
+- ~~PHP 8.5 minimum~~ — `clone()` with properties and `#[\NoDiscard]` on every wither
+- ~~A read buffer~~ — transports keep partial data across a `Timeout`; `Client` resumes a
+  half-read frame; one deadline per frame
+- ~~`tick()` cannot read a byte~~ — a zero timeout is a poll
+- ~~`awaitMessage(null)` closes quiet connections~~ — blocks in `select()`, wakes for Keep Alive
+- ~~`ping()` eats the next packet~~ — pumps the receive loop
+- ~~Single-slot acknowledgement registers~~ — matched by packet identifier, reentrancy-safe
+- ~~WebSocket masking in a PHP loop~~ — one string XOR, 74–133x faster
 
 ## 2.2 — acknowledgement semantics
 
@@ -72,16 +73,14 @@ Still open in this area, and the biggest remaining structural item:
 ## Unscheduled
 
 - **Async adapter** (ReactPHP / Amp / Revolt). Requires splitting the pure protocol engine
-  from the I/O driver. The `Protocol\` namespace is already pure, so this is available
-  rather than blocked — but it is the largest single piece of work here.
+  from the I/O driver. The `Protocol\` namespace is already pure and reads now survive a
+  timeout at any byte, so this is available rather than blocked — but it is the largest
+  single piece of work here.
 - **Laravel service provider and Symfony bundle.** Blocked on the async work only insofar as
   a blocking client is awkward in Octane and queue workers; a plain listener command is
   possible today.
-- **WebSocket transport completion** — continuation frames, `wss://`, and test coverage. The
-  handshake was fixed in 2.0; the rest of RFC 6455 is not done.
-- **A read buffer** (`Protocol\PacketReader`). Today a frame is read in three or more
-  separate socket calls with no buffer behind them, so a mid-frame timeout desynchronises
-  the stream permanently. This is also a prerequisite for the async work.
+- **`wss://`** — TLS has to be negotiated before the HTTP upgrade, not after. The handshake
+  was fixed in 2.0; framing, including continuation frames, is done and tested since 2.1.
 - **A documentation site** and a benchmark page with figures measured against a real broker.
 
 ## Not planned

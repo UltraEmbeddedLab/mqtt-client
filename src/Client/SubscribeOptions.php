@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace ScienceStories\Mqtt\Client;
 
+use NoDiscard;
+
 /**
  * Immutable subscription options.
  * - For v3, only requested QoS per filter matters (carried in filters).
@@ -26,38 +28,30 @@ final class SubscribeOptions
         }
     }
 
+    #[NoDiscard]
     public function withNoLocal(bool $flag = true): self
     {
-        $c          = clone $this;
-        $c->noLocal = $flag;
-
-        return $c;
+        return clone($this, ['noLocal' => $flag]);
     }
 
+    #[NoDiscard]
     public function withRetainAsPublished(bool $flag = true): self
     {
-        $c                    = clone $this;
-        $c->retainAsPublished = $flag;
-
-        return $c;
+        return clone($this, ['retainAsPublished' => $flag]);
     }
 
+    #[NoDiscard]
     public function withRetainHandling(int $mode): self
     {
-        $c                 = clone $this;
-        $c->retainHandling = ($mode < 0 || $mode > 2) ? 0 : $mode;
-
-        return $c;
+        return clone($this, ['retainHandling' => ($mode < 0 || $mode > 2) ? 0 : $mode]);
     }
 
     /**
      * @param  array<string, mixed>|null  $props
      */
+    #[NoDiscard]
     public function withProperties(?array $props): self
     {
-        $c             = clone $this;
-        $c->properties = $props;
-
-        return $c;
+        return clone($this, ['properties' => $props]);
     }
 }

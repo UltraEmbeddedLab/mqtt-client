@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ScienceStories\Mqtt\Testing;
 
+use InvalidArgumentException;
 use ScienceStories\Mqtt\Contract\TransportInterface;
 use ScienceStories\Mqtt\Exception\ProtocolError;
 use ScienceStories\Mqtt\Exception\Timeout;
@@ -47,6 +48,14 @@ final class InMemoryTransport implements TransportInterface
 {
     /** Bytes waiting to be read by the client (i.e. "sent by the broker"). */
     private string $readBuffer = '';
+
+    /**
+     * Position of the first unread byte in $readBuffer.
+     *
+     * Consuming by offset keeps a test that feeds thousands of packets linear: cutting the
+     * consumed prefix off on every read copied the whole remaining buffer each time.
+     */
+    private int $readOffset = 0;
 
     /** Every byte the client has written, in order. */
     private string $writeBuffer = '';
@@ -95,7 +104,7 @@ final class InMemoryTransport implements TransportInterface
         if (! $this->open) {
             throw new TransportError('Cannot read: transport is not open');
         }
-        if (strlen($this->readBuffer) < $length) {
+        if ($this->pendingBytes() < $length) {
             if ($this->peerClosed) {
                 throw new TransportError('Connection closed by peer during read');
             }
@@ -103,8 +112,12 @@ final class InMemoryTransport implements TransportInterface
             throw new Timeout('Read timed out');
         }
 
-        $out              = substr($this->readBuffer, 0, $length);
-        $this->readBuffer = substr($this->readBuffer, $length);
+        $out = substr($this->readBuffer, $this->readOffset, $length);
+        $this->readOffset += $length;
+        if ($this->readOffset === strlen($this->readBuffer)) {
+            $this->readBuffer = '';
+            $this->readOffset = 0;
+        }
 
         return $out;
     }
@@ -137,6 +150,10 @@ final class InMemoryTransport implements TransportInterface
     /** Append raw bytes to be read by the client. */
     public function feed(string $bytes): self
     {
+        if ($this->readOffset > 0) {
+            $this->readBuffer = substr($this->readBuffer, $this->readOffset);
+            $this->readOffset = 0;
+        }
         $this->readBuffer .= $bytes;
 
         return $this;
@@ -146,7 +163,7 @@ final class InMemoryTransport implements TransportInterface
     public function feedPacket(PacketType $type, int $flags, string $body): self
     {
         return $this->feed(
-            chr(($type->value << 4) | ($flags & 0x0F)) . Bytes::encodeVarInt(strlen($body)) . $body,
+            $this->byte(($type->value << 4) | ($flags & 0x0F)) . Bytes::encodeVarInt(strlen($body)) . $body,
         );
     }
 
@@ -160,7 +177,7 @@ final class InMemoryTransport implements TransportInterface
         return $this->feedPacket(
             PacketType::CONNACK,
             0,
-            chr($sessionPresent ? 0x01 : 0x00) . chr($reasonCode) . $properties,
+            chr($sessionPresent ? 0x01 : 0x00) . $this->byte($reasonCode) . $properties,
         );
     }
 
@@ -194,7 +211,7 @@ final class InMemoryTransport implements TransportInterface
     {
         $body = pack('n', $packetId);
         foreach ($returnCodes as $code) {
-            $body .= chr($code);
+            $body .= $this->byte($code);
         }
 
         return $this->feedPacket(PacketType::SUBACK, 0, $body);
@@ -205,7 +222,7 @@ final class InMemoryTransport implements TransportInterface
     {
         $body = pack('n', $packetId);
         foreach ($reasonCodes as $code) {
-            $body .= chr($code);
+            $body .= $this->byte($code);
         }
 
         return $this->feedPacket(PacketType::UNSUBACK, 0, $body);
@@ -238,7 +255,7 @@ final class InMemoryTransport implements TransportInterface
 
     public function feedDisconnect(int $reasonCode = 0): self
     {
-        return $this->feedPacket(PacketType::DISCONNECT, 0, $reasonCode === 0 ? '' : chr($reasonCode));
+        return $this->feedPacket(PacketType::DISCONNECT, 0, $reasonCode === 0 ? '' : $this->byte($reasonCode));
     }
 
     /** Make subsequent short reads fail with TransportError instead of Timeout. */
@@ -247,6 +264,21 @@ final class InMemoryTransport implements TransportInterface
         $this->peerClosed = true;
 
         return $this;
+    }
+
+    /**
+     * One wire byte, rejecting values that do not fit.
+     *
+     * A test that feeds reason code 256 has a bug; masking it to 0 would turn that bug into
+     * a passing test about success, and PHP 8.5 deprecates out-of-range chr() anyway.
+     */
+    private function byte(int $value): string
+    {
+        if ($value < 0 || $value > 255) {
+            throw new InvalidArgumentException("A wire byte must be between 0 and 255, got $value");
+        }
+
+        return chr($value);
     }
 
     // ------------------------------------------------------------- assertions
@@ -328,7 +360,7 @@ final class InMemoryTransport implements TransportInterface
     /** Bytes fed but not yet consumed by the client. */
     public function pendingBytes(): int
     {
-        return strlen($this->readBuffer);
+        return strlen($this->readBuffer) - $this->readOffset;
     }
 
     public function isTlsEnabled(): bool

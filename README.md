@@ -6,11 +6,13 @@
 [![PHP Version](https://img.shields.io/packagist/php-v/ultraembeddedlab/mqtt-client)](https://packagist.org/packages/ultraembeddedlab/mqtt-client)
 [![PHPStan](https://img.shields.io/badge/PHPStan-level%20max-brightgreen)](https://phpstan.org/)
 
-Modern, production-grade MQTT 3.1.1 & 5.0 client for PHP 8.4+
+Modern, production-grade MQTT 3.1.1 & 5.0 client for PHP 8.5+
 
 ## Features
 
-- **Modern PHP 8.4+** with strict types and modern syntax
+- **Modern PHP 8.5+** with strict types; the immutable options are built with `clone()` and
+  `#[\NoDiscard]`, so a `with*()` call whose result is thrown away warns instead of silently
+  doing nothing
 - **MQTT 3.1.1 & 5.0** protocol support
 - **TLS 1.2+ & mutual TLS (mTLS)** — TLS 1.0/1.1 refused by default (RFC 8996); typed `TlsOptions` for client certificates, CA verification and ALPN
 - **WebSocket transport** (`ws://`) with RFC 6455 framing — `wss://` is not functional yet, see [Known Limitations](#known-limitations)
@@ -28,7 +30,7 @@ Modern, production-grade MQTT 3.1.1 & 5.0 client for PHP 8.4+
 
 ## Requirements
 
-- PHP 8.4 or higher
+- PHP 8.5 or higher
 - `ext-json` (bundled with PHP and not removable since 8.0)
 - `ext-openssl` — only for TLS (`mqtts://`, `wss://`). Plain TCP works without it.
 
@@ -382,7 +384,8 @@ re-subscribes on its own; it returns `false` while disconnected rather than thro
 Stated up front rather than discovered in production:
 
 - **`wss://` does not work.** `WsTransport` performs the HTTP upgrade before TLS can be
-  enabled, so only `ws://` completes a handshake. `ws://` itself has no test coverage yet.
+  enabled, so only `ws://` completes a handshake. `ws://` itself — masking, fragmented
+  messages, ping/pong — is unit-tested and verified against Mosquitto 2.0.
 - **Inbound MQTT 5 topic aliases are not resolved.** If a broker sends aliased PUBLISH
   packets, the topic arrives empty. Leave `withTopicAliasMaximum()` at 0 (the default).
 - **Acknowledgement reason codes are not acted on.** A PUBACK or SUBACK carrying a failure

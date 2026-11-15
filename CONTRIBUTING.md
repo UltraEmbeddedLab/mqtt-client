@@ -29,7 +29,7 @@ Small, well-tested fixes are just as welcome as large features.
 
 ## Development setup
 
-Requirements: PHP 8.4+, Composer, and Docker for the integration suite.
+Requirements: PHP 8.5+, Composer, and Docker for the integration suite.
 
 ```bash
 git clone https://github.com/UltraEmbeddedLab/mqtt-client.git
@@ -98,8 +98,13 @@ The tooling enforces most of this; the rest is convention worth knowing:
 - PSR-12 via Pint, plus `declare(strict_types=1)` in every file.
 - Pint imports global functions and constants, hence the long `use function` blocks —
   do not remove them.
-- `Options` and the `*Options` family are immutable by convention: `with*()` clones then
-  assigns. New value objects should use PHP 8.4 `private(set)` (see `TopicAliasManager`).
+- `Options` and the `*Options` family are immutable by convention: every `with*()` is a
+  single `clone($this, [...])` and carries `#[\NoDiscard]`, so calling one without using the
+  result warns. A test enforces the attribute on every wither. New value objects should use
+  `private(set)` (see `TopicAliasManager`).
+- Anything that reads from a transport must tolerate a `Timeout` at any byte. The shipped
+  transports keep partially received data, and `Client` keeps a half-read frame header
+  across `loopOnce()` calls. Do not add a read that discards bytes on timeout.
 - PHPStan runs at level max with `treatPhpDocTypesAsCertain` and `checkMissingTypehints`.
   Do not add `@phpstan-ignore` to silence an error — `reportUnmatchedIgnoredErrors` is on,
   so a suppression that stops being needed will fail the build.

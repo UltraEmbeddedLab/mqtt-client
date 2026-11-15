@@ -44,16 +44,24 @@ final class Bytes
      * Decode a variable length integer (MQTT Remaining Length).
      *
      * @param  int  $consumed  Number of bytes consumed (output)
+     * @param  int  $offset  Where in $data the integer starts. Passing it, rather than a
+     *                       substr() of the remainder, avoids copying the rest of a
+     *                       packet — payload included — to read one to four bytes.
      *
      * @throws ProtocolError if malformed
      */
-    public static function decodeVarInt(string $data, int &$consumed = 0): int
+    public static function decodeVarInt(string $data, int &$consumed = 0, int $offset = 0): int
     {
+        if ($offset < 0) {
+            // A negative string offset counts from the end, which would read the wrong bytes.
+            throw new ProtocolError("VarInt offset cannot be negative, got $offset");
+        }
+
         $multiplier = 1;
         $value      = 0;
         $consumed   = 0;
 
-        for ($i = 0; $i < 4; $i++) {
+        for ($i = $offset; $i < $offset + 4; $i++) {
             if (! isset($data[$i])) {
                 throw new ProtocolError('Malformed VarInt: data too short');
             }
