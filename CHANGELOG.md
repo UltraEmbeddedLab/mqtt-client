@@ -7,13 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-15
+
+PHP 8.5, and a client that can hold a connection open: a timeout at any byte of a packet no
+longer loses data, Keep Alive is driven by what the client sends, a silent link is detected,
+and the receive path is faster. No source change is required to upgrade — see
+**[UPGRADE.md](UPGRADE.md#20--21)** for the behaviour you can observe.
+
 ### Changed
 
 - **PHP 8.5 is now required.** Under the compatibility promise this is a minor change: on PHP 8.4 Composer keeps installing 2.0.x. CI runs on 8.5, the stock-image install check uses `php:8.5-cli`, and PHP 8.6 runs as an allowed-to-fail job so its deprecations surface before users meet them.
 - **Discarding a `with*()` result now warns.** Every wither on `Options`, `TlsOptions`, `SubscribeOptions` and `WillOptions` is a single PHP 8.5 `clone($this, [...])` and carries `#[\NoDiscard]`, so `$options->withKeepAlive(30);` — which never had any effect — emits a warning instead of silently doing nothing. A test pins the attribute on every wither.
 - **`ping()` processes whatever arrives before the PINGRESP** rather than reading two raw bytes and throwing `ProtocolError` when they were not a PINGRESP. See the Fixed entry below.
 - **`loopOnce()` may return `false` before its timeout** when that timeout runs past the moment the next PINGREQ is due, so the next call can send it. Callers that loop are unaffected.
-- Development dependencies: Pest 5.3, PHPStan 2.3, Rector 2.8, Pint 1.32, Symfony components 8.1.11 (clears CVE-2026-109413 and CVE-2026-123792 in the dev-only `symfony/yaml`). PHPStan, Pint and Rector now target PHP 8.5; Rector applies its PHP 8.5 set.
+- Development dependencies: Pest 5.3, PHPStan 2.3, Rector 2.8, Pint 1.32, Symfony components 8.1.11 (clears CVE-2026-109413 and CVE-2026-123792 in the dev-only `symfony/yaml`). PHPStan, Pint and Rector now target PHP 8.5. Rector reads the target from `composer.json`, applies its PHP 8.5 set, and now also covers `examples/` and `benchmarks/`.
+
+### Added
+
+- `Options::withPingResponseTimeout()` and `Options::$pingResponseTimeout` (default 10.0s).
+- `Util\Clock` — the monotonic time source the whole library now reads.
+- `Bytes::decodeVarInt()` takes an optional `$offset` (new trailing parameter).
+- `benchmarks/inbound-throughput.php` — the whole receive path through public API over a real loopback socket, timing the client only; `benchmarks/hot-paths.php` — MQTT 5 decode and WebSocket masking.
+
+### Deprecated
+
+- `Transport\TransportScheme` — referenced nowhere; there is no URI parsing that selects a transport. Scheduled for removal in 3.0.
+
+### Fixed — the client can now hold a connection open
+
+Five defects that only show up on a long-lived connection, which is what this library is for.
+
+- **Keep Alive was driven by inbound traffic.** `touchActivity()` ran after every read and the ping timer measured from it, but MQTT-3.1.2-23 obliges the *client* to send within the window — receiving does not count. A subscriber on a busy topic therefore never sent PINGREQ and was dropped by the broker every 1.5×keepAlive, then flapped forever. The clock is now split: `$lastSent` (updated in `trackWrite()`, so every outbound packet counts) drives the ping; `$lastReceived` is kept for liveness only.
+- **A single lost PINGRESP disabled keepalive for the life of the process.** The outstanding-ping flag was set on send and cleared only on receipt, with no deadline — so after one unanswered PINGREQ the client sat on a dead socket that still reported `isOpen()`, receiving nothing, with auto-reconnect never firing because the transport looked healthy. This is the classic NAT-eviction / black-holed-broker failure. There is now a deadline (`Options::withPingResponseTimeout()`, default 10s). It is evaluated only after a poll that found the socket **silent**, never on elapsed wall time alone — judging it on the clock would tear down a healthy connection whenever the caller's loop interval exceeds the timeout, which is ordinary for a worker polling every 30s or a handler that blocks on a database write. Two silent polls are required, so one slow iteration cannot condemn a live link, and any inbound packet clears the ping since it proves the link is alive even if the PINGRESP itself was lost. On expiry the client dispatches `Events\ServerDisconnect`, closes the transport, and — when `autoReconnect` is off, which is the default — stops `run()`/`messages()` rather than spinning on a closed socket.
+- **`server_keep_alive` from CONNACK was decoded and ignored**, violating MQTT-3.2.2-22. Requesting 300s against a broker that grants 60s produced an endless 90-second connect/drop loop. The granted value is now what the client pings on, and the override is logged.
+- **Every deadline used wall-clock `microtime()`.** An NTP step of +45s expired all of them at once: an in-flight QoS 1 publish "timed out", resent with DUP, exhausted its retries and threw for a message the broker had already acknowledged. A backward step stalled keepalive past the broker's window. All 36 sites across the client, flow control, rate limiter and both transports now read `Util\Clock::now()`, which is monotonic `hrtime()`. `time()` is deliberately kept for `SessionState::$savedAt`, where wall-clock is the correct meaning.
+- **Flow control leaked a slot on every failed publish.** The QoS 1/2 wait released its slot only via PUBACK/PUBCOMP, so a timeout kept it forever. With `receive_maximum = 10`, ten timeouts during a GC pause permanently exhausted the window and every later QoS 1/2 publish threw "timed out waiting for slot" until the process restarted. The slot is now reclaimed by a sweep in `loopOnce()` — deliberately not the instant `publish()` gives up, because MQTT-4.9.0-1 counts an unacknowledged message against Receive Maximum until the broker acknowledges it, and freeing it early would let the client exceed the window the broker granted. The sweep waits out the full resend budget, doubled.
 
 ### Fixed — the receive path
 
@@ -36,14 +64,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Measured with the two new benchmarks on PHP 8.5, old and new code alternated and the best of each round kept:
 
-| `benchmarks/inbound-throughput.php` — client µs per message | 2.0 | now |
+| `benchmarks/inbound-throughput.php` — client µs per message | 2.0.0 | 2.1.0 |
 |---|---|---|
 | MQTT 3.1.1, QoS 0, 64 B | 4.6 | 3.8 |
 | MQTT 3.1.1, QoS 0, 1 KiB | 7.0 | 5.6 |
 | MQTT 5.0, QoS 0, 64 KiB | 126 | 95 |
 | MQTT 5.0, QoS 0, 1 MiB | 2,574 | 1,837 |
 
-| `benchmarks/hot-paths.php` | 2.0 | now |
+| `benchmarks/hot-paths.php` | 2.0.0 | 2.1.0 |
 |---|---|---|
 | MQTT 5 PUBLISH decode, 1 MiB payload | 31.6 µs | 16.7 µs |
 | WebSocket frame encode, 16 KiB | 956 µs | 7.2 µs |
@@ -55,30 +83,6 @@ Where it came from:
 - The MQTT 5 decoder copied the rest of the packet — payload included — to read each one-to-four byte property length. `Bytes::decodeVarInt()` now takes an offset and reads in place.
 - The `PacketReceived` event concatenated header and body, a full copy of every inbound packet, even with no dispatcher configured. Optional collaborators (`events`, `metrics`, flow control, topic aliases) are now called with `?->`, which also skips evaluating the arguments when they are absent.
 - WebSocket masking was a `chr()`/`ord()` loop per byte in PHP; it is now one string XOR.
-
-### Deprecated
-
-- `Transport\TransportScheme` — referenced nowhere; there is no URI parsing that selects a transport. Scheduled for removal in 3.0.
-
-### Added
-
-- `Bytes::decodeVarInt()` takes an optional `$offset` (new trailing parameter).
-- `benchmarks/inbound-throughput.php` — the whole receive path through public API over a real loopback socket, timing the client only; `benchmarks/hot-paths.php` — MQTT 5 decode and WebSocket masking.
-
-### Fixed — the client can now hold a connection open
-
-Four defects that only show up on a long-lived connection, which is what this library is for.
-
-- **Keep Alive was driven by inbound traffic.** `touchActivity()` ran after every read and the ping timer measured from it, but MQTT-3.1.2-23 obliges the *client* to send within the window — receiving does not count. A subscriber on a busy topic therefore never sent PINGREQ and was dropped by the broker every 1.5×keepAlive, then flapped forever. The clock is now split: `$lastSent` (updated in `trackWrite()`, so every outbound packet counts) drives the ping; `$lastReceived` is kept for liveness only.
-- **A single lost PINGRESP disabled keepalive for the life of the process.** The outstanding-ping flag was set on send and cleared only on receipt, with no deadline — so after one unanswered PINGREQ the client sat on a dead socket that still reported `isOpen()`, receiving nothing, with auto-reconnect never firing because the transport looked healthy. This is the classic NAT-eviction / black-holed-broker failure. There is now a deadline (`Options::withPingResponseTimeout()`, default 10s). It is evaluated only after a poll that found the socket **silent**, never on elapsed wall time alone — judging it on the clock would tear down a healthy connection whenever the caller's loop interval exceeds the timeout, which is ordinary for a worker polling every 30s or a handler that blocks on a database write. Two silent polls are required, so one slow iteration cannot condemn a live link, and any inbound packet clears the ping since it proves the link is alive even if the PINGRESP itself was lost. On expiry the client dispatches `Events\ServerDisconnect`, closes the transport, and — when `autoReconnect` is off, which is the default — stops `run()`/`messages()` rather than spinning on a closed socket.
-- **`server_keep_alive` from CONNACK was decoded and ignored**, violating MQTT-3.2.2-22. Requesting 300s against a broker that grants 60s produced an endless 90-second connect/drop loop. The granted value is now what the client pings on, and the override is logged.
-- **Every deadline used wall-clock `microtime()`.** An NTP step of +45s expired all of them at once: an in-flight QoS 1 publish "timed out", resent with DUP, exhausted its retries and threw for a message the broker had already acknowledged. A backward step stalled keepalive past the broker's window. All 36 sites across the client, flow control, rate limiter and both transports now read `Util\Clock::now()`, which is monotonic `hrtime()`. `time()` is deliberately kept for `SessionState::$savedAt`, where wall-clock is the correct meaning.
-- **Flow control leaked a slot on every failed publish.** The QoS 1/2 wait released its slot only via PUBACK/PUBCOMP, so a timeout kept it forever. With `receive_maximum = 10`, ten timeouts during a GC pause permanently exhausted the window and every later QoS 1/2 publish threw "timed out waiting for slot" until the process restarted. The slot is now reclaimed by a sweep in `loopOnce()` — deliberately not the instant `publish()` gives up, because MQTT-4.9.0-1 counts an unacknowledged message against Receive Maximum until the broker acknowledges it, and freeing it early would let the client exceed the window the broker granted. The sweep waits out the full resend budget, doubled.
-
-### Added
-
-- `Options::withPingResponseTimeout()` and `Options::$pingResponseTimeout` (default 10.0s).
-- `Util\Clock` — the monotonic time source the whole library now reads.
 
 ## [2.0.0] - 2026-08-02
 
@@ -270,7 +274,8 @@ compiles against 2.0.
 - Easy facade for simple usage
 - Comprehensive examples and documentation
 
-[Unreleased]: https://github.com/UltraEmbeddedLab/mqtt-client/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/UltraEmbeddedLab/mqtt-client/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/UltraEmbeddedLab/mqtt-client/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/UltraEmbeddedLab/mqtt-client/compare/v1.3.0...v2.0.0
 [1.3.0]: https://github.com/UltraEmbeddedLab/mqtt-client/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/UltraEmbeddedLab/mqtt-client/compare/v1.1.0...v1.2.0

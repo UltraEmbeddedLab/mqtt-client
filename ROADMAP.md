@@ -5,87 +5,95 @@ version are wanted but unscheduled. This is a statement of intent, not a promise
 
 Everything here is open to contribution — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## 2.1 — correctness on long-lived connections ✅ done, unreleased
+The order is deliberate: first nothing may be silently lost (2.2), then the remaining MQTT 5
+surface (2.3), then every API decision that needs a major release, taken in one go while it
+is still cheap (3.0) — and only then the framework integrations built on that API.
 
-All five landed; see the `[Unreleased]` section of the CHANGELOG.
+## 2.1 — PHP 8.5, long-lived connections, the receive path ✅
 
-- ~~Keepalive driven by outbound traffic~~ — `$lastSent` vs `$lastReceived`
-- ~~Detect a missing PINGRESP~~ — `Options::withPingResponseTimeout()`, default 10s
-- ~~Honour `server_keep_alive`~~ — the granted value is what the client pings on
-- ~~A monotonic clock~~ — `Util\Clock::now()` over `hrtime()`, everywhere
-- ~~Release the flow-control slot on a failed publish~~ — `awaitPublishAck()` + try/finally
-
-## 2.1 — PHP 8.5 and the receive path ✅ done, unreleased
+See the [2.1.0 changelog](CHANGELOG.md).
 
 - ~~PHP 8.5 minimum~~ — `clone()` with properties and `#[\NoDiscard]` on every wither
-- ~~A read buffer~~ — transports keep partial data across a `Timeout`; `Client` resumes a
-  half-read frame; one deadline per frame
-- ~~`tick()` cannot read a byte~~ — a zero timeout is a poll
-- ~~`awaitMessage(null)` closes quiet connections~~ — blocks in `select()`, wakes for Keep Alive
-- ~~`ping()` eats the next packet~~ — pumps the receive loop
+- ~~Keep Alive driven by outbound traffic~~, ~~missing PINGRESP detected~~,
+  ~~`server_keep_alive` honoured~~, ~~a monotonic clock for every deadline~~
+- ~~A read buffer~~ — a timeout at any byte of a packet loses nothing
+- ~~`tick()` cannot read a byte~~, ~~`awaitMessage(null)` closes quiet connections~~
+- ~~`ping()` eats the next packet~~ — it pumps the receive loop and owns its deadline
 - ~~Single-slot acknowledgement registers~~ — matched by packet identifier, reentrancy-safe
-- ~~WebSocket masking in a PHP loop~~ — one string XOR, 74–133x faster
+- ~~WebSocket framing~~ — atomic frames, continuation frames, masking 74–133x faster
 
-## 2.2 — acknowledgement semantics
+## 2.2 — nothing silently lost
 
-- **Act on PUBACK / PUBCOMP / SUBACK reason codes.** They are logged, not raised. Publishing
-  to an ACL-denied topic returns a packet ID as if delivered; subscribing to a denied topic
-  returns `void` and the application waits forever for messages that will never arrive.
-- **Record granted QoS, not requested QoS,** and stop re-subscribing to filters the broker
-  rejected.
-- **Suppress PUBREL when PUBREC carries an error code** (MQTT-4.3.3-4).
+Defects a first user would hit. All fixable without changing a signature.
 
-## 2.3 — MQTT 5 completeness
-
-- **Resolve inbound topic aliases.** The client invites the broker to use aliases but never
-  resolves them, so every PUBLISH after the first arrives with an empty topic. Until this
+- **Resolve inbound topic aliases.** The client can invite the broker to use aliases but
+  never resolves them, so every aliased PUBLISH arrives with an empty topic. Until this
   lands, leave `withTopicAliasMaximum()` at 0.
+- **Stop re-subscribing to filters the broker refused**, and record the granted QoS rather
+  than the requested one. `subscribeWith()` already returns the SUBACK codes; `subscribe()`
+  discards them, so a refused filter is retried on every reconnect.
+- **A conforming QoS 2 sender.** After PUBREC the client must retransmit PUBREL, not the
+  PUBLISH, and must not send PUBREL at all when PUBREC carries an error code (MQTT-4.3.3).
 - **Enforce broker-advertised limits** — Maximum QoS, Retain Available, Maximum Packet Size.
-  All are decoded and none are enforced, so the client writes packets the broker will reject.
-- **Full CONNECT and Will property sets.** Six of nine documented CONNECT properties and all
-  Will Properties are silently dropped by the encoder — including `will_delay_interval`,
-  which is the main reason to adopt MQTT 5 for device presence.
+  All are decoded and none are enforced, so the client writes packets the broker rejects.
 - **Parse the complete property set on decode.** All four property parsers stop at the first
-  unrecognised identifier, so a legal property the client does not know discards every
-  property after it.
-- **Ordered, repeatable User Properties.** Currently collapsed into an associative array, so
-  duplicates are lost and the library cannot read back what its own encoder can write.
+  identifier they do not know, discarding every property after it.
+- **A packet-identifier allocator per client instance** that skips identifiers still in
+  flight, replacing the process-global counter. `Util\RandomId::packetId()` stays for
+  anyone calling it directly.
+- **Session persistence that keeps its promise.** QoS 2 state is saved, loaded and then
+  discarded, and in-flight QoS 1/2 publishes are not saved at all.
+- **Full CONNECT and Will property sets.** Six of nine documented CONNECT properties and all
+  Will Properties are dropped by the encoder — including `will_delay_interval`, the main
+  reason to adopt MQTT 5 for device presence.
+
+## 2.3 — the rest of MQTT 5, and `wss://`
+
 - **AUTH packet and enhanced authentication** (SCRAM, Kerberos, OAuth token refresh). Packet
-  type 15 does not exist; enterprise brokers requiring it are unusable.
+  type 15 does not exist yet; brokers that require it cannot be used.
+- **`wss://`.** TLS has to be negotiated before the HTTP upgrade, not after. Many cloud
+  brokers only offer MQTT over secure WebSocket.
+- **Documented request/response.** `Client\RequestResponse` exists and is undocumented.
 
-## 3.0 — the API decisions that need a major
+## 3.0 — every API decision that needs a major, at once
 
-- **Typed MQTT 5 properties.** `array<string, mixed>` across `PublishOptions`,
-  `SubscribeOptions`, `WillOptions` and `InboundMessage`. A misspelled key is silently
-  ignored today and static analysis cannot see it.
-- **`TopicFilter` value object and a `RetainHandling` enum** for `subscribeWith()`, replacing
-  the `array{filter: string, qos: int}` shape.
-- **`PublishResult`** replacing `publish(): int`, which currently returns `0` for
-  "queued offline", "dropped, queue full" and "QoS 0 sent" alike.
-- **Enforced immutability** — `public private(set)` on `Options` and the `*Options` family,
-  which are documented immutable but have plain public properties.
+Taken together, before anyone depends on the 2.x shapes, rather than spread over several
+majors.
+
+- **Rename the PHP namespace** `ScienceStories\Mqtt` → `UltraEmbeddedLab\Mqtt`, matching the
+  package name, with `class_alias()` shims for one minor cycle.
+- **Per-subscription callbacks** — `subscribe('sensors/+', fn (InboundMessage $m) => …)`,
+  routed by topic filter, alongside the global `onMessage()`.
+- **Refused operations raise.** A SUBACK refusal, or a PUBACK/PUBCOMP failure code, becomes
+  an exception instead of a log line.
+- **`PublishResult`** replacing `publish(): int`, which returns `0` for "queued offline",
+  "dropped, queue full" and "QoS 0 sent" alike.
+- **Typed MQTT 5 properties**, with ordered, repeatable User Properties, replacing
+  `array<string, mixed>` on `PublishOptions`, `SubscribeOptions`, `WillOptions` and
+  `InboundMessage`. A misspelled key is silently ignored today.
+- **`TopicFilter` value object and a `RetainHandling` enum** for `subscribeWith()`.
+- **Connect from a URI** — `mqtts://user:pass@broker:8883`, `ws://…` — parsed with PHP 8.5's
+  `Uri\Rfc3986\Uri`, choosing the transport and TLS from the scheme.
+- **Enforced immutability** — `readonly` on `Options` and the `*Options` family.
 - **Split `ClientInterface`** from the message pump, and add `isConnected()` / `state()`.
-- **Rename the PHP namespace** `ScienceStories\Mqtt` → `UltraEmbeddedLab\Mqtt`, with
-  `class_alias()` shims for one minor cycle.
-- **A packet-identifier allocator per client instance** with an in-use set, replacing the
-  process-global static counter.
+- **Remove what 2.x deprecated** — `ConnectResult::$reasonCode`, `Transport\TransportScheme`.
 
-## Unscheduled
+## After 3.0 — integrations and proof
 
-- **Async adapter** (ReactPHP / Amp / Revolt). Requires splitting the pure protocol engine
-  from the I/O driver. The `Protocol\` namespace is already pure and reads now survive a
-  timeout at any byte, so this is available rather than blocked — but it is the largest
-  single piece of work here.
-- **Laravel service provider and Symfony bundle.** Blocked on the async work only insofar as
-  a blocking client is awkward in Octane and queue workers; a plain listener command is
-  possible today.
-- **`wss://`** — TLS has to be negotiated before the HTTP upgrade, not after. The handshake
-  was fixed in 2.0; framing, including continuation frames, is done and tested since 2.1.
-- **A documentation site** and a benchmark page with figures measured against a real broker.
+- **Laravel package** — service provider, config, facade, an `mqtt:listen` Artisan command,
+  and queue/event integration. Then a **Symfony bundle**.
+- **Interoperability matrix in CI** — Mosquitto 2.0 and 2.1, EMQX, HiveMQ CE, NanoMQ. (The
+  `eclipse-mosquitto:2` image now resolves to 2.1, whose WebSocket listener rejects every
+  upgrade with the repository's config; that needs sorting out first.)
+- **Coverage of 85 % or more**, and a published mutation score (`pest --mutate`).
+- **A documentation site**, and benchmarks against real brokers alongside other PHP clients.
+- **Async adapter** (ReactPHP / Amp / Revolt). The `Protocol\` namespace is pure and reads
+  survive a timeout at any byte, so this is unblocked — but it is the largest single piece of
+  work here.
 
 ## Not planned
 
-- Dropping PHP 8.4 support for a lower minimum.
+- Supporting PHP versions older than the current minimum.
 - An MQTT **broker**. This is a client library.
 
 ---

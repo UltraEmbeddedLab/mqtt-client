@@ -10,23 +10,23 @@ Modern, production-grade MQTT 3.1.1 & 5.0 client for PHP 8.5+
 
 ## Features
 
-- **Modern PHP 8.5+** with strict types; the immutable options are built with `clone()` and
-  `#[\NoDiscard]`, so a `with*()` call whose result is thrown away warns instead of silently
-  doing nothing
-- **MQTT 3.1.1 & 5.0** protocol support
+- **MQTT 3.1.1 & 5.0** — QoS 0, 1 and 2, retained messages, Last Will, MQTT 5 properties
+- **Built for connections that stay open for days** — Keep Alive driven by what the client
+  sends, a silent or black-holed link detected and closed, every deadline on a monotonic
+  clock, and a receive path that survives a timeout at any byte of a packet
 - **TLS 1.2+ & mutual TLS (mTLS)** — TLS 1.0/1.1 refused by default (RFC 8996); typed `TlsOptions` for client certificates, CA verification and ALPN
 - **WebSocket transport** (`ws://`) with RFC 6455 framing — `wss://` is not functional yet, see [Known Limitations](#known-limitations)
-- **Auto-reconnect** with exponential backoff and jitter
-- **QoS 0, 1, 2** with automatic resend on ACK timeout
-- **Session persistence** for reliable message delivery
-- **Rate limiter** (token bucket) to prevent broker flooding
+- **Auto-reconnect** with exponential backoff and jitter, re-subscribing on its own
+- **QoS 1 and 2 resend** with the DUP flag on acknowledgement timeout
+- **Session persistence** — subscriptions survive a restart (`FileSessionStore`, or your own `SessionStoreInterface`)
 - **Offline message queue** with automatic drain on reconnect
-- **Topic aliases** (MQTT 5.0)
-- **Flow control** (MQTT 5.0)
-- **Shared subscriptions** (MQTT 5.0)
-- **Byte counters** for traffic monitoring (`bytesSent()` / `bytesReceived()`)
-- **PSR-3** logging support
-- **PSR-14** event dispatcher support
+- **Rate limiter** (token bucket) to keep from flooding a broker
+- **MQTT 5 flow control, shared subscriptions and outbound topic aliases**
+- **Unit-testable without a broker** — `Testing\InMemoryTransport` scripts the broker's side, see [Testing](docs/testing.md)
+- **PSR-3** logging, **PSR-14** events, byte counters (`bytesSent()` / `bytesReceived()`)
+- **Modern PHP 8.5** with strict types and PHPStan at level max; the immutable options carry
+  `#[\NoDiscard]`, so a `with*()` call whose result is thrown away warns instead of silently
+  doing nothing
 
 ## Requirements
 
@@ -347,7 +347,7 @@ be mistaken for a live one:
 
 ```php
 use ScienceStories\Mqtt\Exception\AuthenticationError;
-use ScienceStories\Mqtt\Exception\MqttException;
+use ScienceStories\Mqtt\Exception\Timeout;
 use ScienceStories\Mqtt\Exception\TransportError;
 
 try {
@@ -364,6 +364,8 @@ try {
 A long-running loop should survive transient failures rather than dying on the first one:
 
 ```php
+use ScienceStories\Mqtt\Exception\MqttException;
+
 $client->onMessage(fn ($message) => handle($message));
 
 while (true) {
@@ -389,16 +391,24 @@ Stated up front rather than discovered in production:
 - **Inbound MQTT 5 topic aliases are not resolved.** If a broker sends aliased PUBLISH
   packets, the topic arrives empty. Leave `withTopicAliasMaximum()` at 0 (the default).
 - **Acknowledgement reason codes are not acted on.** A PUBACK or SUBACK carrying a failure
-  code is logged, not raised — a rejected subscription looks successful.
+  code is logged, not raised — a rejected subscription looks successful. `subscribeWith()`
+  returns the codes in its `SubscribeResult`; `subscribe()` does not.
+- **QoS 2 retransmission is not yet conforming.** Once PUBREC has arrived only PUBREL may
+  be sent again, but if PUBCOMP is late the client resends the PUBLISH (with DUP) instead.
+- **Broker-advertised limits are not enforced.** Maximum QoS, Retain Available and Maximum
+  Packet Size from CONNACK are decoded but not checked before publishing.
+- **Session persistence covers subscriptions only.** In-flight QoS 1/2 messages are not
+  saved, so they do not survive a process restart.
 - **The client is blocking.** There is no ReactPHP/Amp adapter yet; run it in a dedicated
   process or worker.
 - **No Laravel or Symfony bridge yet.**
 
-See [CHANGELOG.md](CHANGELOG.md) for what changed and what is planned.
+Each of these is scheduled in the [Roadmap](ROADMAP.md) — most of them for 2.2.
 
 ## Documentation
 
-- [Upgrading from 1.x](UPGRADE.md) — what changed in 2.0 and how to migrate
+- [Upgrade guide](UPGRADE.md) — 2.0 → 2.1, and 1.x → 2.0
+- [Changelog](CHANGELOG.md) — every change, with the reasoning behind it
 - [Backward Compatibility Promise](docs/backward-compatibility.md) — what semver covers here
 - [Roadmap](ROADMAP.md) — what is planned, and where help is wanted
 
