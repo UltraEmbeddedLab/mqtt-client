@@ -67,3 +67,36 @@ test('Options withCleanSession returns new instance', function (): void {
         ->and($updated->cleanSession)->toBeFalse()
         ->and($updated)->not->toBe($original);
 });
+
+test('every with*() on the immutable options classes is #[NoDiscard]', function (string $class): void {
+    // `$options->withKeepAlive(30);` without using the result compiles, runs and changes
+    // nothing. PHP 8.5 turns that into a warning, but only where the attribute is present.
+    $withers = array_filter(
+        new ReflectionClass($class)->getMethods(ReflectionMethod::IS_PUBLIC),
+        static fn (ReflectionMethod $m): bool => str_starts_with($m->getName(), 'with'),
+    );
+
+    expect($withers)->not->toBeEmpty();
+    foreach ($withers as $method) {
+        expect($method->getAttributes(NoDiscard::class))
+            ->toHaveCount(1, "$class::{$method->getName()}() is missing #[\NoDiscard]");
+    }
+})->with([
+    ScienceStories\Mqtt\Client\Options::class,
+    ScienceStories\Mqtt\Client\TlsOptions::class,
+    ScienceStories\Mqtt\Client\SubscribeOptions::class,
+    ScienceStories\Mqtt\Client\WillOptions::class,
+]);
+
+test('clone-with withers leave the original untouched and copy every other field', function (): void {
+    $original = new Options(host: 'a', clientId: 'id', keepAlive: 10)->withMessageFilter('x/#');
+    $changed  = $original->withMessageFilter('y/+')->withTopicAliasMaximum(70_000)->withSessionExpiry(-5);
+
+    expect($original->messageFilters)->toBe(['x/#'])
+        ->and($original->topicAliasMaximum)->toBe(0)
+        ->and($changed->messageFilters)->toBe(['x/#', 'y/+'])
+        ->and($changed->topicAliasMaximum)->toBe(65535)
+        ->and($changed->sessionExpiry)->toBe(0)
+        ->and($changed->clientId)->toBe('id')
+        ->and($changed->keepAlive)->toBe(10);
+});

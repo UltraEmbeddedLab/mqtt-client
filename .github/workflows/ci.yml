@@ -19,9 +19,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ['8.4']
+        php: ['8.5']
+        experimental: [false]
+        # The next PHP release, so a deprecation or break shows up here months before a
+        # user hits it. Allowed to fail: a pre-release runtime is not a reason to block a
+        # merge, only a reason to look.
+        include:
+          - php: '8.6'
+            experimental: true
 
     name: PHP ${{ matrix.php }} Tests
+    continue-on-error: ${{ matrix.experimental }}
 
     env:
       MQTT_HOST: 127.0.0.1
@@ -75,7 +83,7 @@ jobs:
         run: vendor/bin/pest --coverage --coverage-clover=coverage.xml --min=50
 
       - name: Upload coverage to Codecov
-        if: matrix.php == '8.4'
+        if: matrix.php == '8.5'
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: coverage.xml
@@ -89,8 +97,8 @@ jobs:
 
   install-on-stock-php:
     runs-on: ubuntu-latest
-    name: Install on stock php:8.4-cli
-    container: php:8.4-cli
+    name: Install on stock php:8.5-cli
+    container: php:8.5-cli
     # Guards against a phantom extension requirement. `ext-sockets` sat in `require`
     # while nothing in src/ ever called a socket_* function, so `composer require` failed
     # on the official images while every other job stayed green.
@@ -125,7 +133,7 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
-          php-version: '8.4'
+          php-version: '8.5'
           extensions: openssl
 
       - name: Install dependencies
@@ -150,7 +158,7 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
-          php-version: '8.4'
+          php-version: '8.5'
           extensions: openssl
 
       - name: Install dependencies
@@ -170,7 +178,7 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
-          php-version: '8.4'
+          php-version: '8.5'
           extensions: openssl
           coverage: xdebug
 
@@ -192,7 +200,7 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
-          php-version: '8.4'
+          php-version: '8.5'
           extensions: openssl
 
       - name: Install dependencies
@@ -212,7 +220,7 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
-          php-version: '8.4'
+          php-version: '8.5'
           extensions: openssl
 
       - name: Install dependencies
@@ -250,7 +258,7 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
-          php-version: '8.4'
+          php-version: '8.5'
 
       - name: Validate composer.json
         run: composer validate --strict

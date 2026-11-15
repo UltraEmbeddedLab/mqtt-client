@@ -17,6 +17,8 @@ use ScienceStories\Mqtt\Protocol\QoS;
 use ScienceStories\Mqtt\Transport\TcpTransport;
 use ScienceStories\Mqtt\Util\RandomId;
 
+use function usleep;
+
 final class Mqtt
 {
     /**
@@ -47,9 +49,7 @@ final class Mqtt
         ?LoggerInterface $logger = null,
     ): void {
         // Auto-detect port based on TLS setting
-        if ($port === null) {
-            $port = $tls ? 8883 : 1883;
-        }
+        $port ??= $tls ? 8883 : 1883;
 
         $client = self::connect(
             host: $host,

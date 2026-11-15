@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ScienceStories\Mqtt\Client;
 
+use Closure;
 use Generator;
 use LogicException;
 use Psr\EventDispatcher\EventDispatcherInterface;
@@ -62,10 +63,12 @@ use function is_array;
 use function is_int;
 use function is_string;
 use function max;
+use function min;
 use function mt_getrandmax;
 use function mt_rand;
 use function ord;
 use function pack;
+use function round;
 use function strlen;
 use function strtoupper;
 use function substr;
@@ -86,6 +89,15 @@ final class Client implements ClientInterface
      */
     private const int MIN_SILENT_POLLS = 2;
 
+    /**
+     * Body slice right after a frame times out (see $frameBodySlice). Small, so the next
+     * read completes from bytes the transport already holds and liveness sees them; it
+     * doubles on every read that succeeds, up to MAX_FRAME_SLICE, while data keeps flowing.
+     */
+    private const int MIN_FRAME_SLICE = 256;
+
+    private const int MAX_FRAME_SLICE = 65_536;
+
     private EncoderInterface $encoder;
 
     private DecoderInterface $decoder;
@@ -98,9 +110,57 @@ final class Client implements ClientInterface
 
     private bool $shouldStop = false;
 
-    private ?SubAck $lastSubAck = null;
+    /**
+     * Acknowledgements for requests still being waited on, keyed by ackKey().
+     *
+     * A waiter registers its key (value null) before sending, loopOnce() fills it in, and
+     * the waiter removes it however it ends. Two properties follow from that:
+     * - a nested wait — publish() from inside an onMessage() handler — cannot overwrite the
+     *   outer wait's acknowledgement, which the single "last PUBACK" slot this replaces did;
+     * - an acknowledgement nobody is waiting for (a PUBACK that arrives after its publish()
+     *   gave up) is dropped rather than accumulating.
+     *
+     * @var array<int, PubAck|PubComp|SubAck|UnsubAck|null>
+     */
+    private array $acks = [];
 
-    private ?UnsubAck $lastUnsubAck = null;
+    /**
+     * First byte of a frame whose remainder has not arrived yet, or null between frames.
+     *
+     * Partial-frame state lives here, across loopOnce() calls, so that a timeout halfway
+     * through a packet header resumes where it stopped instead of reading the next byte as
+     * a new packet type and desynchronising the stream for good.
+     *
+     * @var int<0, 255>|null
+     */
+    private ?int $frameHeader = null;
+
+    /** Remaining Length bytes of that frame read so far. */
+    private string $frameLength = '';
+
+    /** Body bytes of that frame read so far, once it is being read in slices. */
+    private string $frameBody = '';
+
+    /**
+     * Bytes per body read once the frame has timed out at least once; 0 reads it whole.
+     *
+     * Reading the body whole is fastest — on a healthy link it arrives in one call, without
+     * a copy. But it gives liveness no signal until the last byte: a large body trickling
+     * in over a slow link while a PINGREQ is out, its PINGRESP queued behind that very
+     * body, looked like a silent link and was condemned. After the first timeout the body
+     * is read in slices instead, each through trackRead(), so arriving bytes count as life:
+     * a link that delivers MIN_FRAME_SLICE bytes per Ping Response Timeout stays up.
+     */
+    private int $frameBodySlice = 0;
+
+    /**
+     * True while ping() owns the outstanding PINGREQ. Its deadline is then the caller's,
+     * not housekeeping's: a health check must not condemn the link it is checking.
+     */
+    private bool $pingOwnedByCaller = false;
+
+    /** PINGRESPs received on this client — ping() waits for this to move. */
+    private int $pingResponses = 0;
 
     /** Monotonic seconds at the last packet we sent — this drives Keep Alive. */
     private float $lastSent;
@@ -125,10 +185,6 @@ final class Client implements ClientInterface
      * (MQTT-3.2.2-22 makes honouring it mandatory), otherwise the configured value.
      */
     private int $effectiveKeepAlive;
-
-    private ?PubAck $lastPubAck = null;
-
-    private ?PubComp $lastPubComp = null;
 
     /** @var array<int, InboundMessage> QoS2 inbound pending messages by Packet Identifier */
     private array $qos2InboundPending = [];
@@ -203,11 +259,113 @@ final class Client implements ClientInterface
         $this->lastReceived = Clock::now();
     }
 
-    private function dispatch(object $event): void
+    /**
+     * Read one complete MQTT frame, resuming a partial one left by an earlier call.
+     *
+     * The whole frame shares one deadline. A Timeout leaves every byte already read in
+     * $frameHeader/$frameLength or in the transport, which keeps {@see readExact()}
+     * atomic, so nothing is lost and the next call picks up mid-frame.
+     *
+     * Returns null when the declared Remaining Length exceeds the configured maximum: the
+     * transport has been closed by then, because the stream sits mid-frame and cannot be
+     * resynchronised.
+     *
+     * @return array{type: int, flags: int, header: string, body: string}|null
+     *
+     * @throws Timeout       nothing complete arrived in time; partial state is kept
+     * @throws ProtocolError the Remaining Length is malformed; the transport is closed
+     */
+    private function readFrame(?float $timeoutSec, string $what = 'packet'): ?array
     {
-        if ($this->events instanceof EventDispatcherInterface) {
-            $this->events->dispatch($event);
+        $deadline = $timeoutSec === null ? null : Clock::now() + $timeoutSec;
+
+        $this->frameHeader ??= ord($this->trackRead(1, $timeoutSec)[0]);
+
+        // Remaining Length: one to four bytes, high bit set on all but the last.
+        while ($this->frameLength === '' || (ord($this->frameLength[-1]) & 0x80) !== 0) {
+            if (strlen($this->frameLength) === 4) {
+                $this->transport->close();
+                $this->resetFrameState();
+
+                throw new ProtocolError('Malformed Remaining Length: exceeds 4 bytes');
+            }
+            $this->frameLength .= $this->trackRead(1, $this->remainingTime($deadline));
         }
+
+        $remainingLength = Bytes::decodeVarInt($this->frameLength);
+        if (! $this->packetSizeAllowed($remainingLength, $what)) {
+            $this->resetFrameState();
+
+            return null;
+        }
+
+        while (strlen($this->frameBody) < $remainingLength) {
+            $missing = $remainingLength - strlen($this->frameBody);
+            try {
+                $piece = $this->trackRead(
+                    $this->frameBodySlice === 0 ? $missing : min($missing, $this->frameBodySlice),
+                    $this->remainingTime($deadline),
+                );
+            } catch (Timeout $e) {
+                $this->frameBodySlice = self::MIN_FRAME_SLICE;
+
+                throw $e;
+            }
+            $this->frameBody = $this->frameBody === '' ? $piece : $this->frameBody.$piece;
+            if ($this->frameBodySlice > 0) {
+                $this->frameBodySlice = min(self::MAX_FRAME_SLICE, $this->frameBodySlice * 2);
+            }
+        }
+
+        $body  = $this->frameBody;
+        $frame = [
+            'type'   => $this->frameHeader >> 4,
+            'flags'  => $this->frameHeader & 0x0F,
+            'header' => chr($this->frameHeader).$this->frameLength,
+            'body'   => $body,
+        ];
+        $this->resetFrameState();
+
+        return $frame;
+    }
+
+    private function resetFrameState(): void
+    {
+        $this->frameHeader    = null;
+        $this->frameLength    = '';
+        $this->frameBody      = '';
+        $this->frameBodySlice = 0;
+    }
+
+    /** Seconds left until $deadline, never negative; null means no deadline. */
+    private function remainingTime(?float $deadline): ?float
+    {
+        return $deadline === null ? null : max(0.0, $deadline - Clock::now());
+    }
+
+    /**
+     * Cap a poll so it wakes in time for Keep Alive housekeeping.
+     *
+     * Without this, loopOnce(null) — what awaitMessage(null) runs — blocked in the read
+     * for as long as the connection stayed quiet, so no PINGREQ was ever sent and the
+     * broker dropped the client after 1.5x Keep Alive. Returning early is harmless: every
+     * caller that waits longer loops, and the next iteration sends the ping.
+     */
+    private function pollTimeout(?float $requested): ?float
+    {
+        $keepAlive = $this->effectiveKeepAlive;
+        if ($keepAlive <= 0 || $this->pingOwnedByCaller) {
+            // ping() passes its own remaining time and owns the deadline.
+            return $requested;
+        }
+
+        $now = Clock::now();
+        $due = $this->pingSentAt === null
+            ? max(1.0, $keepAlive * 0.9)          - ($now - $this->lastSent)
+            : $this->options->pingResponseTimeout - ($now - $this->pingSentAt);
+        $due = max(0.0, $due);
+
+        return $requested === null ? $due : min($requested, $due);
     }
 
     private function sendPingReq(): void
@@ -262,7 +420,7 @@ final class Client implements ClientInterface
      */
     private function expirePingIfSilent(): void
     {
-        if ($this->pingSentAt === null || ! $this->transport->isOpen()) {
+        if ($this->pingSentAt === null || $this->pingOwnedByCaller || ! $this->transport->isOpen()) {
             return;
         }
 
@@ -289,15 +447,13 @@ final class Client implements ClientInterface
             'timeout'       => $this->options->pingResponseTimeout,
             'silentPolls'   => $this->silentPolls,
         ]);
-        if ($this->metrics instanceof MetricsInterface) {
-            $this->metrics->increment('ping_timeouts');
-        }
+        $this->metrics?->increment('ping_timeouts');
 
         // Tell the application before tearing anything down. The inbound-DISCONNECT branch
         // does the same; a connection dying silently is how a supervisor ends up watching a
         // live process that will never deliver another message.
         $willReconnect = $this->options->autoReconnect;
-        $this->dispatch(new EvServerDisconnect(
+        $this->events?->dispatch(new EvServerDisconnect(
             new Disconnect(ReasonCode::KeepAliveTimeout->value),
             $willReconnect,
         ));
@@ -342,6 +498,92 @@ final class Client implements ClientInterface
         $this->logger->info('Opening connection', ['host' => $this->options->host, 'port' => $this->options->port]);
         $this->transport->open($this->options->host, $this->options->port);
 
+        try {
+            $connack = $this->handshake();
+        } catch (Throwable $e) {
+            // Whatever failed after open() — TLS, a timeout waiting for CONNACK, a malformed
+            // or refused one — must not leave a half-open transport behind. isOpen() would
+            // stay true, so auto-reconnect would never retry, and the next loopOnce() would
+            // treat whatever the broker sent next as traffic on a live session.
+            $this->transport->close();
+            $this->resetFrameState();
+
+            throw $e;
+        }
+        $versionStr = $this->options->version->value;
+
+        // MQTT-3.2.2-22: when the broker sends a Server Keep Alive, the client MUST use it
+        // instead of the value it asked for. Ignoring it means pinging on a schedule the
+        // broker has already rejected — e.g. asking for 300s against a broker that grants
+        // 60s produces an endless 90-second connect/drop loop.
+        $serverKeepAlive          = $connack->getServerKeepAlive();
+        $this->effectiveKeepAlive = $serverKeepAlive ?? $this->options->keepAlive;
+        if ($serverKeepAlive !== null && $serverKeepAlive !== $this->options->keepAlive) {
+            $this->logger->info('Broker overrode Keep Alive', [
+                'requested' => $this->options->keepAlive,
+                'granted'   => $serverKeepAlive,
+            ]);
+        }
+
+        // Inbound QoS 2 messages awaiting PUBREL are Session state. Discard them only
+        // when the broker has discarded its half of the session too, otherwise a replayed
+        // PUBREL would be answered with PUBCOMP for a message never delivered upstream.
+        if ($this->options->cleanSession || ! $connack->sessionPresent) {
+            $this->qos2InboundPending = [];
+        }
+
+        $assignedId = null;
+        if ($this->options->version === MqttVersion::V5_0 && is_array($connack->properties)) {
+            $assignedId = $connack->properties['assigned_client_identifier'] ?? null;
+            if (! is_string($assignedId)) {
+                $assignedId = null;
+            }
+
+            // Initialize Topic Alias Manager with broker's limit
+            $brokerTopicAliasMax = $connack->properties['topic_alias_maximum'] ?? 0;
+            if (is_int($brokerTopicAliasMax) && $brokerTopicAliasMax > 0) {
+                $this->topicAliasManager = new TopicAliasManager($brokerTopicAliasMax);
+                $this->logger->debug('Topic Alias Manager initialized', ['max' => $brokerTopicAliasMax]);
+            }
+
+            // Initialize Flow Control with broker's receive_maximum
+            $brokerReceiveMax = $connack->properties['receive_maximum'] ?? 65535;
+            if (is_int($brokerReceiveMax) && $brokerReceiveMax > 0) {
+                $this->flowControl = new FlowControl($brokerReceiveMax);
+                $this->logger->debug('Flow Control initialized', ['max' => $brokerReceiveMax]);
+            }
+        }
+
+        // Restore session state if session store is configured and session was present
+        $clientId = $assignedId ?? $this->options->clientId;
+        if ($this->options->sessionStore instanceof SessionStoreInterface && $connack->sessionPresent && ! $this->options->cleanSession) {
+            $this->restoreSession($clientId);
+        }
+
+        $this->metrics?->increment('connections', 1.0, ['version' => $versionStr]);
+        $this->metrics?->observe('connect_duration_seconds', Clock::now() - $connectStart);
+
+        // Drain offline queue after successful connect
+        $this->drainOfflineQueue();
+
+        return new ConnectResult(
+            $connack->sessionPresent,
+            'MQTT',
+            $versionStr,
+            $connack->returnCode,
+            $assignedId,
+            $connack,
+        );
+    }
+
+    /**
+     * TLS, CONNECT, and a successful CONNACK — everything between open() and a usable
+     * session. Any failure throws, and connect() closes the transport.
+     *
+     * @throws MqttException
+     */
+    private function handshake(): ConnAck
+    {
         if ($this->options->useTls) {
             $tlsOpts = $this->options->tlsOptions;
             if ($tlsOpts instanceof TlsOptions) {
@@ -396,120 +638,38 @@ final class Client implements ClientInterface
         $this->logger->debug('>> CONNECT', ['bytes' => strlen($data), 'preview' => $this->hexPreview($data)]);
         $this->trackWrite($data);
 
-        // Read the fixed header: 1 byte type, then varint remaining length (1-4 bytes)
         $this->logger->debug('<< waiting for CONNACK');
-        $typeByte   = $this->trackRead(1, 5.0);
-        $packetType = ord($typeByte[0]) >> 4;
-        if ($packetType !== PacketType::CONNACK->value) {
-            throw new ProtocolError("Expected CONNACK, got type $packetType");
+        // The size bound in readFrame() runs before the body is read: this read is
+        // pre-authentication, so an unauthenticated peer must not be able to size the
+        // allocation. connect() has no bool contract to honour, so a violation is fatal
+        // here rather than a skipped packet.
+        $frame = $this->readFrame(5.0, 'CONNACK')
+            ?? throw new ProtocolError("Declared CONNACK size exceeds the maximum of {$this->options->maximumPacketSize} bytes");
+        if ($frame['type'] !== PacketType::CONNACK->value) {
+            throw new ProtocolError("Expected CONNACK, got type {$frame['type']}");
         }
-
-        // Read Remaining Length varint
-        $varBytes = '';
-        for ($i = 0; $i < 4; $i++) {
-            $b = $this->trackRead(1, 5.0);
-            $varBytes .= $b;
-            $byte = ord($b);
-            if (($byte & 0x80) === 0) {
-                break;
-            }
-        }
-        $consumed     = 0;
-        $remainingLen = Bytes::decodeVarInt($varBytes, $consumed);
-        if ($remainingLen < 2) {
+        $body = $frame['body'];
+        if (strlen($body) < 2) {
             // v3: at least 2 bytes (ack flags + return code), v5: also followed by properties
-            throw new ProtocolError("Invalid CONNACK length: $remainingLen");
+            throw new ProtocolError('Invalid CONNACK length: '.strlen($body));
         }
-        // Bound the allocation before it happens: this read is pre-authentication, so an
-        // unauthenticated peer must not be able to size it. connect() has no bool contract
-        // to honour, so a violation here is fatal rather than a skipped packet.
-        if (! $this->packetSizeAllowed($remainingLen, 'CONNACK')) {
-            throw new ProtocolError("Declared CONNACK size of $remainingLen bytes exceeds the maximum of {$this->options->maximumPacketSize}");
-        }
-
-        $body = $this->trackRead($remainingLen, 5.0);
-        $this->logger->debug('<< CONNACK', ['bytes' => $remainingLen, 'preview' => $this->hexPreview($typeByte.$varBytes.$body)]);
+        $this->logger->debug('<< CONNACK', ['bytes' => strlen($body), 'preview' => $this->hexPreview($frame['header'].$body)]);
         $connack = $this->decoder->decodeConnAck($body);
 
-        $versionStr = $this->options->version->value;
-
-        $this->logger->info('CONNACK', ['sessionPresent' => $connack->sessionPresent, 'reasonCode' => $connack->returnCode, 'version' => $versionStr]);
+        $this->logger->info('CONNACK', ['sessionPresent' => $connack->sessionPresent, 'reasonCode' => $connack->returnCode, 'version' => $this->options->version->value]);
 
         if ($connack->returnCode !== 0) {
             // MQTT-3.2.2-7: the broker closes the network connection after a refusal.
             // Returning normally here would make the caller replay buffered publishes
             // into a dead socket and surface an auth failure as a later read timeout.
-            $this->transport->close();
+            // connect() closes the transport on the way out.
             $exception = $this->connectRefusedException($connack);
             $this->logger->warning('CONNECT refused', ['reasonCode' => $connack->returnCode, 'error' => $exception->getMessage()]);
 
             throw $exception;
         }
 
-        // MQTT-3.2.2-22: when the broker sends a Server Keep Alive, the client MUST use it
-        // instead of the value it asked for. Ignoring it means pinging on a schedule the
-        // broker has already rejected — e.g. asking for 300s against a broker that grants
-        // 60s produces an endless 90-second connect/drop loop.
-        $serverKeepAlive          = $connack->getServerKeepAlive();
-        $this->effectiveKeepAlive = $serverKeepAlive ?? $this->options->keepAlive;
-        if ($serverKeepAlive !== null && $serverKeepAlive !== $this->options->keepAlive) {
-            $this->logger->info('Broker overrode Keep Alive', [
-                'requested' => $this->options->keepAlive,
-                'granted'   => $serverKeepAlive,
-            ]);
-        }
-
-        // Inbound QoS 2 messages awaiting PUBREL are Session state. Discard them only
-        // when the broker has discarded its half of the session too, otherwise a replayed
-        // PUBREL would be answered with PUBCOMP for a message never delivered upstream.
-        if ($this->options->cleanSession || ! $connack->sessionPresent) {
-            $this->qos2InboundPending = [];
-        }
-
-        $assignedId = null;
-        if ($this->options->version === MqttVersion::V5_0 && is_array($connack->properties)) {
-            $assignedId = $connack->properties['assigned_client_identifier'] ?? null;
-            if (! is_string($assignedId)) {
-                $assignedId = null;
-            }
-
-            // Initialize Topic Alias Manager with broker's limit
-            $brokerTopicAliasMax = $connack->properties['topic_alias_maximum'] ?? 0;
-            if (is_int($brokerTopicAliasMax) && $brokerTopicAliasMax > 0) {
-                $this->topicAliasManager = new TopicAliasManager($brokerTopicAliasMax);
-                $this->logger->debug('Topic Alias Manager initialized', ['max' => $brokerTopicAliasMax]);
-            }
-
-            // Initialize Flow Control with broker's receive_maximum
-            $brokerReceiveMax = $connack->properties['receive_maximum'] ?? 65535;
-            if (is_int($brokerReceiveMax) && $brokerReceiveMax > 0) {
-                $this->flowControl = new FlowControl($brokerReceiveMax);
-                $this->logger->debug('Flow Control initialized', ['max' => $brokerReceiveMax]);
-            }
-        }
-
-        // Restore session state if session store is configured and session was present
-        $clientId = $assignedId ?? $this->options->clientId;
-        if ($this->options->sessionStore instanceof SessionStoreInterface && $connack->sessionPresent && ! $this->options->cleanSession) {
-            $this->restoreSession($clientId);
-        }
-
-        if ($this->metrics instanceof MetricsInterface) {
-            $this->metrics->increment('connections', 1.0, ['version' => $versionStr]);
-            $this->metrics->observe('connect_duration_seconds', Clock::now() - $connectStart);
-        }
-
-        // Drain offline queue after successful connect
-        $this->drainOfflineQueue();
-
-        return new ConnectResult(
-            $connack->sessionPresent,
-            'MQTT',
-            $versionStr,
-            $connack->returnCode,
-            $assignedId,
-            $connack,
-        );
+        return $connack;
     }
 
     public function disconnect(string $reason = ''): void
@@ -532,9 +692,7 @@ final class Client implements ClientInterface
 
         $this->transport->close();
         $this->resetConnectionState();
-        if ($this->metrics instanceof MetricsInterface) {
-            $this->metrics->increment('disconnections', 1.0, ['reason' => $reason !== '' ? 'client' : 'normal']);
-        }
+        $this->metrics?->increment('disconnections', 1.0, ['reason' => $reason !== '' ? 'client' : 'normal']);
         $this->logger->info('Disconnected', ['reason' => $reason]);
     }
 
@@ -543,7 +701,7 @@ final class Client implements ClientInterface
      *
      * Packet Identifiers, topic aliases and flow-control quota are all defined per
      * connection, so anything surviving a reconnect corrupts the next session — a stale
-     * `pingOutstanding` silently disables keepalive for the life of the process, and a
+     * `$pingSentAt` silently disables keepalive for the life of the process, and a
      * stale de-duplication cache drops messages the new session has never seen.
      *
      * Two things are deliberately *not* cleared here:
@@ -557,19 +715,17 @@ final class Client implements ClientInterface
      */
     private function resetConnectionState(): void
     {
-        if ($this->topicAliasManager instanceof TopicAliasManager) {
-            $this->topicAliasManager->reset();
-        }
-        if ($this->flowControl instanceof FlowControl) {
-            $this->flowControl->reset();
-        }
-        $this->qos1Seen     = [];
-        $this->pingSentAt   = null;
-        $this->silentPolls  = 0;
-        $this->lastSubAck   = null;
-        $this->lastUnsubAck = null;
-        $this->lastPubAck   = null;
-        $this->lastPubComp  = null;
+        $this->topicAliasManager?->reset();
+        $this->flowControl?->reset();
+        $this->qos1Seen    = [];
+        $this->pingSentAt  = null;
+        $this->silentPolls = 0;
+        // A half-read frame belongs to the byte stream of the connection that just ended.
+        $this->resetFrameState();
+        // $acks is deliberately not touched. Each key belongs to a waiter still on the call
+        // stack, which resends on the new connection and must be able to receive the answer;
+        // one already received is a fact the broker stated, and dropping it would only force
+        // a needless DUP resend. Each waiter removes its own key however it ends.
         // Start both clocks now, so a fresh connection is not immediately "overdue".
         $this->touchSent();
         $this->touchReceived();
@@ -598,9 +754,7 @@ final class Client implements ClientInterface
             'maximum'  => $max,
         ]);
         $this->transport->close();
-        if ($this->metrics instanceof MetricsInterface) {
-            $this->metrics->increment('oversized_packets_rejected');
-        }
+        $this->metrics?->increment('oversized_packets_rejected');
 
         return false;
     }
@@ -638,16 +792,12 @@ final class Client implements ClientInterface
         if (! $this->transport->isOpen() && $this->offlineQueue instanceof OfflineQueue) {
             if ($this->offlineQueue->enqueue($topic, $payload, $options)) {
                 $this->logger->debug('Message queued offline', ['topic' => $topic, 'queued' => $this->offlineQueue->count()]);
-                if ($this->metrics instanceof MetricsInterface) {
-                    $this->metrics->increment('offline_queue_enqueued');
-                }
+                $this->metrics?->increment('offline_queue_enqueued');
 
                 return 0;
             }
             $this->logger->warning('Offline queue full, message dropped', ['topic' => $topic]);
-            if ($this->metrics instanceof MetricsInterface) {
-                $this->metrics->increment('offline_queue_dropped');
-            }
+            $this->metrics?->increment('offline_queue_dropped');
 
             return 0;
         }
@@ -656,8 +806,8 @@ final class Client implements ClientInterface
         $rateLimiter = $this->options->rateLimiter;
         if ($rateLimiter instanceof RateLimiter) {
             $waited = $rateLimiter->acquire();
-            if ($waited > 0 && $this->metrics instanceof MetricsInterface) {
-                $this->metrics->observe('rate_limit_wait_seconds', $waited);
+            if ($waited > 0) {
+                $this->metrics?->observe('rate_limit_wait_seconds', $waited);
             }
         }
 
@@ -725,19 +875,16 @@ final class Client implements ClientInterface
             'packetId'      => $packetId,
         ]);
         // PSR-14: emit PacketSent event for PUBLISH
-        $this->dispatch(new EvPacketSent($data, PacketType::PUBLISH->value));
+        $this->events?->dispatch(new EvPacketSent($data, PacketType::PUBLISH->value));
         $this->trackWrite($data);
 
-        // Track in-flight for flow control
-        // @phpstan-ignore-next-line notIdentical.alwaysTrue - packetId is set when qos > 0
-        if ($qos > 0 && $this->flowControl instanceof FlowControl && $packetId !== null) {
-            $this->flowControl->trackSend($packetId);
+        // Track in-flight for flow control (a packet identifier exists only for QoS 1/2)
+        if ($packetId !== null) {
+            $this->flowControl?->trackSend($packetId);
         }
 
-        if ($this->metrics instanceof MetricsInterface) {
-            $this->metrics->increment('publish_sent', 1.0, ['qos' => $qos]);
-            $this->metrics->size('publish_payload_bytes', strlen($payload), ['qos' => $qos]);
-        }
+        $this->metrics?->increment('publish_sent', 1.0, ['qos' => $qos]);
+        $this->metrics?->size('publish_payload_bytes', strlen($payload), ['qos' => $qos]);
 
         return $this->awaitPublishAck($qos, (int) $packetId, $publishTopic, $payload, $options, $publishProps);
     }
@@ -771,14 +918,15 @@ final class Client implements ClientInterface
                 'graceSeconds' => round($grace, 3),
             ]);
             $this->flowControl->trackAck($packetId);
-            if ($this->metrics instanceof MetricsInterface) {
-                $this->metrics->increment('flow_control_slots_reclaimed');
-            }
+            $this->metrics?->increment('flow_control_slots_reclaimed');
         }
     }
 
     /**
      * Block until the broker acknowledges a QoS 1/2 publish, resending with DUP on timeout.
+     *
+     * QoS 1 completes on PUBACK, QoS 2 on PUBCOMP; the PUBREC/PUBREL step in between is
+     * answered by loopOnce() itself.
      *
      * @param  array<string, mixed>|null  $publishProps
      * @return int The packet identifier, or 0 for QoS 0
@@ -787,102 +935,140 @@ final class Client implements ClientInterface
      */
     private function awaitPublishAck(int $qos, int $packetId, string $publishTopic, string $payload, PublishOptions $options, ?array $publishProps): int
     {
-        switch ($qos) {
-            case 0:
-                return 0;
-            case 1:
-                $pid         = $packetId;
-                $ackTimeout  = $this->options->ackTimeout;
-                $maxResends  = $this->options->maxResendAttempts;
-                $resendCount = 0;
-                $deadline    = Clock::now() + $ackTimeout;
-                while (true) {
-                    $timeLeft = $deadline - Clock::now();
-                    if ($timeLeft <= 0) {
-                        if ($resendCount >= $maxResends) {
-                            throw new Timeout("Timed out waiting for PUBACK after $resendCount resend(s)");
-                        }
-                        // Resend with DUP flag
-                        $resendPkt = new Publish(
-                            $publishTopic,
-                            $payload,
-                            $options->qos,
-                            $options->retain,
-                            dup: true,
-                            packetId: $packetId,
-                            properties: $publishProps,
-                        );
-                        $resendData = $this->encoder->encodePublish($resendPkt);
-                        $this->logger->debug('>> PUBLISH (resend)', ['packetId' => $pid, 'attempt' => $resendCount + 1]);
-                        $this->trackWrite($resendData);
-                        $resendCount++;
-                        $deadline = Clock::now() + $ackTimeout;
-
-                        continue;
-                    }
-                    $ok = $this->loopOnce(max(0.01, $timeLeft));
-                    if (! $ok) {
-                        continue;
-                    }
-                    $ack = $this->lastPubAck;
-                    if ($ack instanceof PubAck && $ack->packetId === $pid) {
-                        $this->logger->info('PUBACK', ['packetId' => $ack->packetId, 'reasonCode' => $ack->reasonCode, 'success' => $ack->isSuccess()]);
-                        $this->lastPubAck = null;
-
-                        return $pid;
-                    }
-                }
-                // no break
-            case 2:
-                $pid               = $packetId;
-                $ackTimeout2       = $this->options->ackTimeout;
-                $maxResends2       = $this->options->maxResendAttempts;
-                $resendCount2      = 0;
-                $deadline          = Clock::now() + $ackTimeout2;
-                $this->lastPubComp = null;
-                while (true) {
-                    $timeLeft = $deadline - Clock::now();
-                    if ($timeLeft <= 0) {
-                        if ($resendCount2 >= $maxResends2) {
-                            throw new Timeout("Timed out waiting for QoS2 handshake after $resendCount2 resend(s)");
-                        }
-                        // Resend with DUP flag
-                        $resendPkt2 = new Publish(
-                            $publishTopic,
-                            $payload,
-                            $options->qos,
-                            $options->retain,
-                            dup: true,
-                            packetId: $packetId,
-                            properties: $publishProps,
-                        );
-                        $resendData2 = $this->encoder->encodePublish($resendPkt2);
-                        $this->logger->debug('>> PUBLISH (QoS2 resend)', ['packetId' => $pid, 'attempt' => $resendCount2 + 1]);
-                        $this->trackWrite($resendData2);
-                        $resendCount2++;
-                        $deadline = Clock::now() + $ackTimeout2;
-
-                        continue;
-                    }
-                    $ok = $this->loopOnce(max(0.01, $timeLeft));
-                    if (! $ok) {
-                        continue;
-                    }
-                    // Completion when PUBCOMP arrives for our packetId
-                    $comp = $this->lastPubComp;
-                    if ($comp instanceof PubComp && $comp->packetId === $pid) {
-                        $this->logger->info('PUBCOMP', ['packetId' => $comp->packetId, 'reasonCode' => $comp->reasonCode, 'success' => $comp->isSuccess()]);
-                        $this->lastPubComp = null;
-
-                        return $pid;
-                    }
-                }
+        if ($qos === 0) {
+            return 0;
         }
 
-        // Unreachable: QoS 0 returns above, QoS 1/2 loop until acknowledged or throw.
-        return 0;
+        [$type, $class, $what] = $qos === 1
+            ? [PacketType::PUBACK, PubAck::class, 'PUBACK']
+            : [PacketType::PUBCOMP, PubComp::class, 'QoS2 handshake'];
+
+        $resends = 0;
+
+        try {
+            $ack = $this->awaitAck(
+                $type,
+                $packetId,
+                $class,
+                $this->options->ackTimeout,
+                $what,
+                function () use (&$resends, $qos, $packetId, $publishTopic, $payload, $options, $publishProps): bool {
+                    if ($resends >= $this->options->maxResendAttempts) {
+                        return false;
+                    }
+                    $resends++;
+                    $this->logger->debug($qos === 1 ? '>> PUBLISH (resend)' : '>> PUBLISH (QoS2 resend)', ['packetId' => $packetId, 'attempt' => $resends]);
+                    $this->trackWrite($this->encoder->encodePublish(new Publish(
+                        $publishTopic,
+                        $payload,
+                        $options->qos,
+                        $options->retain,
+                        dup: true,
+                        packetId: $packetId,
+                        properties: $publishProps,
+                    )));
+
+                    return true;
+                },
+            );
+        } catch (Timeout) {
+            throw new Timeout("Timed out waiting for $what after $resends resend(s)");
+        }
+
+        $this->logger->info($qos === 1 ? 'PUBACK' : 'PUBCOMP', ['packetId' => $packetId, 'reasonCode' => $ack->reasonCode, 'success' => $ack->isSuccess()]);
+
+        return $packetId;
     }
 
+    /**
+     * What has arrived for $key so far. A method rather than an inline read, because
+     * loopOnce() fills the slot behind the caller's back.
+     */
+    private function receivedAck(int $key): PubAck|PubComp|SubAck|UnsubAck|null
+    {
+        return $this->acks[$key] ?? null;
+    }
+
+    /** One integer key per (packet type, Packet Identifier) pair. */
+    private function ackKey(PacketType $type, int $packetId): int
+    {
+        return ($type->value << 16) | $packetId;
+    }
+
+    /** Hand an inbound acknowledgement to whoever is waiting for it, if anyone is. */
+    private function recordAck(PacketType $type, PubAck|PubComp|SubAck|UnsubAck $ack): void
+    {
+        $key = $this->ackKey($type, $ack->packetId);
+        if (array_key_exists($key, $this->acks)) {
+            $this->acks[$key] = $ack;
+
+            return;
+        }
+
+        $this->logger->debug('Acknowledgement nobody is waiting for', ['type' => $type->name, 'packetId' => $ack->packetId]);
+    }
+
+    /**
+     * Pump loopOnce() until the acknowledgement for $packetId arrives.
+     *
+     * Must be called after the request is written and before anything else reads: nothing
+     * can read in between, so an acknowledgement cannot arrive before the key exists.
+     *
+     * @template T of PubAck|PubComp|SubAck|UnsubAck
+     *
+     * @param  class-string<T>  $class
+     * @param  (Closure(): bool)|null  $onExpiry  called when a wait expires; return true after
+     *                                            resending to wait again, false to give up
+     * @return T
+     *
+     * @throws Timeout once the wait expires and $onExpiry declines to retry
+     */
+    private function awaitAck(PacketType $type, int $packetId, string $class, float $timeout, string $what, ?Closure $onExpiry = null): object
+    {
+        $key              = $this->ackKey($type, $packetId);
+        $this->acks[$key] = null;
+
+        try {
+            $deadline = Clock::now() + $timeout;
+            while (true) {
+                $ack = $this->receivedAck($key);
+                if ($ack instanceof $class) {
+                    return $ack;
+                }
+
+                $timeLeft = $deadline - Clock::now();
+                if ($timeLeft <= 0) {
+                    if ($onExpiry instanceof Closure && $onExpiry()) {
+                        $deadline = Clock::now() + $timeout;
+
+                        continue;
+                    }
+
+                    throw new Timeout("Timed out waiting for $what");
+                }
+
+                if (! $this->loopOnce(max(0.01, $timeLeft)) && ! $this->transport->isOpen()) {
+                    // Nothing will arrive on a closed transport until something reconnects
+                    // it; back off instead of spinning a core until the deadline.
+                    usleep(10_000);
+                }
+            }
+        } finally {
+            unset($this->acks[$key]);
+        }
+    }
+
+    /**
+     * Send PINGREQ and wait for the PINGRESP.
+     *
+     * The wait pumps loopOnce(), so anything the broker sends first — a PUBLISH on a
+     * subscribed connection, an acknowledgement — is processed and delivered as usual.
+     * The previous implementation read two raw bytes off the socket instead, which ate the
+     * head of whatever packet happened to arrive first and desynchronised the stream.
+     *
+     * @throws Timeout        if no PINGRESP arrives in time
+     * @throws TransportError if the connection closes while waiting
+     */
     public function ping(?float $timeoutSec = 5.0): bool
     {
         if (! $this->transport->isOpen()) {
@@ -891,32 +1077,38 @@ final class Client implements ClientInterface
         $pkt = chr(PacketType::PINGREQ->value << 4) . chr(0);
         $this->logger->debug('>> PINGREQ');
 
+        $deadline  = Clock::now() + ($timeoutSec ?? 5.0);
+        $responses = $this->pingResponses;
+
         try {
+            $this->pingOwnedByCaller = true;
             $this->trackWrite($pkt);
             $this->pingSentAt = Clock::now();
 
-            $hdr = $this->trackRead(2, $timeoutSec ?? 5.0);
+            while ($this->pingResponses === $responses) {
+                if (! $this->transport->isOpen()) {
+                    throw new TransportError('Connection closed while waiting for PINGRESP');
+                }
+                $timeLeft = $deadline - Clock::now();
+                if ($timeLeft <= 0) {
+                    throw new Timeout('Timed out waiting for PINGRESP');
+                }
+                $this->loopOnce($timeLeft);
+            }
         } finally {
             // This call owns its own request/response round trip, so the outstanding-ping
             // state must not survive it however it ends. Leaving it set would arm the
             // auto-ping deadline against a ping this method already gave up on — a health
             // check that manufactures the outage it exists to detect.
-            $this->pingSentAt  = null;
-            $this->silentPolls = 0;
+            $this->pingSentAt        = null;
+            $this->silentPolls       = 0;
+            $this->pingOwnedByCaller = false;
         }
 
-        $type = (ord($hdr[0]) >> 4);
-        $rl   = ord($hdr[1]);
-        if ($type === PacketType::PINGRESP->value && $rl === 0) {
-            $this->logger->info('PINGRESP OK');
-            if ($this->metrics instanceof MetricsInterface) {
-                $this->metrics->increment('pings');
-            }
+        $this->logger->info('PINGRESP OK');
+        $this->metrics?->increment('pings');
 
-            return true;
-        }
-        $this->logger->info('PINGRESP unexpected', ['type' => $type, 'len' => $rl, 'preview' => $this->hexPreview($hdr)]);
-        throw new ProtocolError('Unexpected response to PINGREQ');
+        return true;
     }
 
     public function subscribe(array $topics, int $qos = 0): void
@@ -936,36 +1128,18 @@ final class Client implements ClientInterface
         $this->logger->debug('>> SUBSCRIBE', ['packetId' => $pid, 'filters' => $filters, 'bytes' => strlen($data), 'preview' => $this->hexPreview($data)]);
         $this->trackWrite($data);
 
-        // Await SUBACK; handle interleaved PUBLISH if broker sends retained messages immediately.
-        $deadline = Clock::now() + 5.0;
-        while (true) {
-            $timeLeft = $deadline - Clock::now();
-            if ($timeLeft <= 0) {
-                throw new Timeout('Timed out waiting for SUBACK');
-            }
-            $ok = $this->loopOnce(max(0.01, $timeLeft));
-            if (! $ok) {
-                // timeout in loopOnce - continue loop until overall deadline
-                continue;
-            }
-            // loopOnce handles SUBACK internally and stores last; break when found
-            if ($this->lastSubAck instanceof SubAck && $this->lastSubAck->packetId === $pid) {
-                $subAck           = $this->lastSubAck;
-                $this->lastSubAck = null;
-                $this->logger->info('SUBACK', ['packetId' => $pid, 'codes' => $subAck->returnCodes]);
+        // Retained messages may arrive before the SUBACK; awaitAck() delivers them as usual.
+        $subAck = $this->awaitAck(PacketType::SUBACK, $pid, SubAck::class, 5.0, 'SUBACK');
+        $this->logger->info('SUBACK', ['packetId' => $pid, 'codes' => $subAck->returnCodes]);
 
-                // Record subscriptions if this is a user-initiated subscription (avoid duplicate records during resubscribe)
-                if (! $this->isResubscribing) {
-                    $this->recordSubscriptionsFromFilters($filters, $options);
-                }
-
-                if ($this->metrics instanceof MetricsInterface) {
-                    $this->metrics->increment('subscriptions', (float) count($filters));
-                }
-
-                return new SubscribeResult($pid, $subAck->returnCodes, $subAck);
-            }
+        // Record subscriptions if this is a user-initiated subscription (avoid duplicate records during resubscribe)
+        if (! $this->isResubscribing) {
+            $this->recordSubscriptionsFromFilters($filters, $options);
         }
+
+        $this->metrics?->increment('subscriptions', (float) count($filters));
+
+        return new SubscribeResult($pid, $subAck->returnCodes, $subAck);
     }
 
     public function unsubscribe(array $topics): void
@@ -986,32 +1160,11 @@ final class Client implements ClientInterface
         $this->logger->debug('>> UNSUBSCRIBE', ['packetId' => $pid, 'filters' => $filters, 'bytes' => strlen($data), 'preview' => $this->hexPreview($data)]);
         $this->trackWrite($data);
 
-        $deadline = Clock::now() + 5.0;
-        while (true) {
-            $timeLeft = $deadline - Clock::now();
-            if ($timeLeft <= 0) {
-                throw new Timeout('Timed out waiting for UNSUBACK');
-            }
-            $ok = $this->loopOnce(max(0.01, $timeLeft));
-            if (! $ok) {
-                continue;
-            }
-            if ($this->lastUnsubAck instanceof UnsubAck && $this->lastUnsubAck->packetId === $pid) {
-                $unsuback           = $this->lastUnsubAck;
-                $this->lastUnsubAck = null;
-                $codes              = $unsuback->reasonCodes ?? [];
-                $this->logger->info('UNSUBACK', ['packetId' => $pid, 'codes' => $codes]);
+        $unsuback = $this->awaitAck(PacketType::UNSUBACK, $pid, UnsubAck::class, 5.0, 'UNSUBACK');
+        $this->logger->info('UNSUBACK', ['packetId' => $pid, 'codes' => $unsuback->reasonCodes ?? []]);
 
-                // Remove from stored subscriptions
-                $this->removeSubscriptions($filters);
-
-                if ($this->metrics instanceof MetricsInterface) {
-                    $this->metrics->increment('unsubscriptions', (float) count($filters));
-                }
-
-                return;
-            }
-        }
+        $this->removeSubscriptions($filters);
+        $this->metrics?->increment('unsubscriptions', (float) count($filters));
     }
 
     public function loopOnce(?float $timeoutSec = 0.1): bool
@@ -1030,51 +1183,38 @@ final class Client implements ClientInterface
         $this->maybeAutoPing();
         $this->sweepStalledFlowControlSlots();
         try {
-            $b0 = $this->trackRead(1, $timeoutSec);
+            $frame = $this->readFrame($this->pollTimeout($timeoutSec));
         } catch (Timeout) {
-            // We listened and heard nothing. Only now may an outstanding PINGREQ count
-            // against its deadline — judging it before the read would condemn a healthy
-            // connection whenever the caller polls less often than the timeout.
+            // We listened and heard nothing complete. Only now may an outstanding PINGREQ
+            // count against its deadline — judging it before the read would condemn a
+            // healthy connection whenever the caller polls less often than the timeout.
             $this->expirePingIfSilent();
 
             return false; // nothing available
         } catch (TransportError) {
             // Transport broke; attempt to reconnect next iteration
-            $this->logger->info('Transport error on readExact; will try to reconnect');
+            $this->logger->info('Transport error on read; will try to reconnect');
             $this->transport->close();
+            $this->resetFrameState();
 
             return false;
         }
-        $type  = (ord($b0[0]) >> 4);
-        $flags = (ord($b0[0]) & 0x0F);
-
-        // Remaining Length varint
-        $varBytes = '';
-        for ($i = 0; $i < 4; $i++) {
-            $b = $this->trackRead(1, $timeoutSec);
-            $varBytes .= $b;
-            $byte = ord($b);
-            if (($byte & 0x80) === 0) {
-                break;
-            }
-        }
-        $consumed = 0;
-        $rl       = Bytes::decodeVarInt($varBytes, $consumed);
-        if (! $this->packetSizeAllowed($rl, 'packet')) {
-            // The stream is positioned mid-frame and cannot be resynchronised, so the
-            // transport is already closed. Report it the way every other transport-level
-            // failure in this method does — as "no packet processed" — so the documented
-            // bool contract holds and auto-reconnect can take over on the next call.
+        if ($frame === null) {
+            // Oversized: the stream is positioned mid-frame and cannot be resynchronised,
+            // so the transport is already closed. Report it the way every other
+            // transport-level failure in this method does — as "no packet processed" — so
+            // the documented bool contract holds and auto-reconnect can take over.
             return false;
         }
-        $body = $this->trackRead($rl, $timeoutSec);
-        // PSR-14: emit PacketReceived with full frame bytes
-        $raw = $b0.$varBytes.$body;
-        if ($this->metrics instanceof MetricsInterface) {
-            $this->metrics->increment('packets_received', 1.0, ['type' => $type]);
-            $this->metrics->size('packet_bytes', strlen($raw), ['dir' => 'in', 'type' => $type]);
-        }
-        $this->dispatch(new EvPacketReceived($raw, $type, $flags, $rl));
+
+        ['type' => $type, 'flags' => $flags, 'header' => $header, 'body' => $body] = $frame;
+        $rl                                                                        = strlen($body);
+        $this->metrics?->increment('packets_received', 1.0, ['type' => $type]);
+        $this->metrics?->size('packet_bytes', strlen($header) + $rl, ['dir' => 'in', 'type' => $type]);
+        // PSR-14: emit PacketReceived with the full frame. The nullsafe call skips evaluating
+        // its argument when nobody listens — concatenating header and body copies the whole
+        // packet, which for a large payload was a measurable share of the receive cost.
+        $this->events?->dispatch(new EvPacketReceived($header.$body, $type, $flags, $rl));
 
         switch ($type) {
             case PacketType::PUBLISH->value:
@@ -1114,9 +1254,7 @@ final class Client implements ClientInterface
                     $this->logger->debug('>> PUBREC', ['packetId' => $pid]);
                     $this->trackWrite($pubrec);
                     // Store message only if not already pending
-                    if (! isset($this->qos2InboundPending[$pid])) {
-                        $this->qos2InboundPending[$pid] = $msg;
-                    }
+                    $this->qos2InboundPending[$pid] ??= $msg;
 
                     return true;
                 }
@@ -1129,39 +1267,32 @@ final class Client implements ClientInterface
                 $this->logger->debug('<< PINGRESP');
                 // Clear outstanding flag to allow future auto PINGs
                 $this->pingSentAt = null;
+                $this->pingResponses++;
 
                 return true;
             case PacketType::SUBACK->value:
-                // store last SUBACK for subscribeWith waiter
-                $dec              = $this->decoder;
-                $this->lastSubAck = $dec->decodeSubAck($body);
+                $this->recordAck(PacketType::SUBACK, $this->decoder->decodeSubAck($body));
 
                 return true;
             case PacketType::UNSUBACK->value:
-                // store last UNSUBACK for unsubscribe waiter
-                $dec                = $this->decoder;
-                $this->lastUnsubAck = $dec->decodeUnsubAck($body);
+                $this->recordAck(PacketType::UNSUBACK, $this->decoder->decodeUnsubAck($body));
 
                 return true;
             case PacketType::PUBACK->value:
                 // QoS 1 acknowledgment: decode full packet with reason code and properties
-                $dec              = $this->decoder;
-                $this->lastPubAck = $dec->decodePubAck($body);
+                $pubAck = $this->decoder->decodePubAck($body);
                 $this->logger->debug('<< PUBACK', [
-                    'packetId'   => $this->lastPubAck->packetId,
-                    'reasonCode' => $this->lastPubAck->reasonCode,
-                    'success'    => $this->lastPubAck->isSuccess(),
+                    'packetId'   => $pubAck->packetId,
+                    'reasonCode' => $pubAck->reasonCode,
+                    'success'    => $pubAck->isSuccess(),
                 ]);
-                // Track ACK for flow control
-                if ($this->flowControl instanceof FlowControl) {
-                    $this->flowControl->trackAck($this->lastPubAck->packetId);
-                }
+                $this->flowControl?->trackAck($pubAck->packetId);
+                $this->recordAck(PacketType::PUBACK, $pubAck);
 
                 return true;
             case PacketType::PUBREL->value:
                 // QoS 2 step 2 (Rx): decode PUBREL, respond with PUBCOMP, and deliver stored message
-                $dec    = $this->decoder;
-                $pubrel = $dec->decodePubRel($body);
+                $pubrel = $this->decoder->decodePubRel($body);
                 $pid    = $pubrel->packetId;
                 $this->logger->debug('<< PUBREL', [
                     'packetId'   => $pid,
@@ -1183,8 +1314,7 @@ final class Client implements ClientInterface
                 return true;
             case PacketType::PUBREC->value:
                 // QoS 2 step 1 (Tx): decode PUBREC, respond with PUBREL
-                $dec    = $this->decoder;
-                $pubrec = $dec->decodePubRec($body);
+                $pubrec = $this->decoder->decodePubRec($body);
                 $pid    = $pubrec->packetId;
                 $this->logger->debug('<< PUBREC', [
                     'packetId'   => $pid,
@@ -1199,23 +1329,19 @@ final class Client implements ClientInterface
                 return true;
             case PacketType::PUBCOMP->value:
                 // QoS 2 step 3 (Tx): decode final PUBCOMP acknowledgment
-                $dec               = $this->decoder;
-                $this->lastPubComp = $dec->decodePubComp($body);
+                $pubComp = $this->decoder->decodePubComp($body);
                 $this->logger->debug('<< PUBCOMP', [
-                    'packetId'   => $this->lastPubComp->packetId,
-                    'reasonCode' => $this->lastPubComp->reasonCode,
-                    'success'    => $this->lastPubComp->isSuccess(),
+                    'packetId'   => $pubComp->packetId,
+                    'reasonCode' => $pubComp->reasonCode,
+                    'success'    => $pubComp->isSuccess(),
                 ]);
-                // Track ACK for flow control (QoS 2 complete)
-                if ($this->flowControl instanceof FlowControl) {
-                    $this->flowControl->trackAck($this->lastPubComp->packetId);
-                }
+                $this->flowControl?->trackAck($pubComp->packetId);
+                $this->recordAck(PacketType::PUBCOMP, $pubComp);
 
                 return true;
             case PacketType::DISCONNECT->value:
                 // Inbound DISCONNECT: decode full packet and dispatch event
-                $dec        = $this->decoder;
-                $disconnect = $dec->decodeDisconnect($body);
+                $disconnect = $this->decoder->decodeDisconnect($body);
                 $this->logger->info('<< DISCONNECT', [
                     'reasonCode' => $disconnect->reasonCode,
                     'isError'    => $disconnect->isError(),
@@ -1224,7 +1350,7 @@ final class Client implements ClientInterface
 
                 // Dispatch ServerDisconnect event before closing transport
                 $willReconnect = $this->options->autoReconnect && $disconnect->isError();
-                $this->dispatch(new EvServerDisconnect($disconnect, $willReconnect));
+                $this->events?->dispatch(new EvServerDisconnect($disconnect, $willReconnect));
 
                 // Reset connection-scoped state
                 $this->resetConnectionState();
@@ -1241,7 +1367,7 @@ final class Client implements ClientInterface
                 return true;
             default:
                 // ignore others for MVP
-                $this->logger->debug('<< IGNORED', ['type' => $type, 'bytes' => $rl, 'preview' => $this->hexPreview($b0.$varBytes.$body)]);
+                $this->logger->debug('<< IGNORED', ['type' => $type, 'bytes' => $rl, 'preview' => $this->hexPreview($header.$body)]);
 
                 return true;
         }
@@ -1394,9 +1520,7 @@ final class Client implements ClientInterface
 
         try {
             $this->logger->info('Attempting reconnect', ['attempt' => $this->reconnectAttempts + 1]);
-            if ($this->metrics instanceof MetricsInterface) {
-                $this->metrics->increment('reconnect_attempts');
-            }
+            $this->metrics?->increment('reconnect_attempts');
             $this->connect();
             $this->reconnectAttempts = 0;
             // Resubscribe
@@ -1458,12 +1582,10 @@ final class Client implements ClientInterface
             return;
         }
 
-        if ($this->metrics instanceof MetricsInterface) {
-            $this->metrics->increment('messages_delivered', 1.0, ['qos' => $msg->qos->value, 'retain' => $msg->retain ? 1 : 0]);
-            $this->metrics->size('message_payload_bytes', strlen($msg->payload), ['dir' => 'in', 'qos' => $msg->qos->value]);
-        }
+        $this->metrics?->increment('messages_delivered', 1.0, ['qos' => $msg->qos->value, 'retain' => $msg->retain ? 1 : 0]);
+        $this->metrics?->size('message_payload_bytes', strlen($msg->payload), ['dir' => 'in', 'qos' => $msg->qos->value]);
         // PSR-14: emit MessageReceived when the message is accepted for delivery
-        $this->dispatch(new EvMessageReceived($msg));
+        $this->events?->dispatch(new EvMessageReceived($msg));
 
         $hasHandler = $this->messageHandler !== null;
 
@@ -1474,9 +1596,7 @@ final class Client implements ClientInterface
         $limit = $this->options->inboundQueueSize;
         if ($limit > 0 && count($this->inbound) >= $limit) {
             $this->inbound->dequeue();
-            if ($this->metrics instanceof MetricsInterface) {
-                $this->metrics->increment('inbound_queue_dropped');
-            }
+            $this->metrics?->increment('inbound_queue_dropped');
             if ($hasHandler) {
                 // Expected in the push-only pattern: the handler already consumed it.
                 $this->logger->debug('Inbound queue full; oldest message discarded', ['limit' => $limit]);
@@ -1632,9 +1752,7 @@ final class Client implements ClientInterface
 
         if ($drained > 0) {
             $this->logger->info('Drained offline queue', ['count' => $drained]);
-            if ($this->metrics instanceof MetricsInterface) {
-                $this->metrics->increment('offline_queue_drained', (float) $drained);
-            }
+            $this->metrics?->increment('offline_queue_drained', (float) $drained);
         }
     }
 }

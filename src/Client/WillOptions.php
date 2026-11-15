@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace ScienceStories\Mqtt\Client;
 
+use NoDiscard;
 use ScienceStories\Mqtt\Protocol\QoS;
 
 /**
@@ -21,46 +22,36 @@ final class WillOptions
     ) {
     }
 
+    #[NoDiscard]
     public function withTopic(string $topic): self
     {
-        $c        = clone $this;
-        $c->topic = $topic;
-
-        return $c;
+        return clone($this, ['topic' => $topic]);
     }
 
+    #[NoDiscard]
     public function withPayload(string $payload): self
     {
-        $c          = clone $this;
-        $c->payload = $payload;
-
-        return $c;
+        return clone($this, ['payload' => $payload]);
     }
 
+    #[NoDiscard]
     public function withQos(QoS $qos): self
     {
-        $c      = clone $this;
-        $c->qos = $qos;
-
-        return $c;
+        return clone($this, ['qos' => $qos]);
     }
 
+    #[NoDiscard]
     public function withRetain(bool $retain = true): self
     {
-        $c         = clone $this;
-        $c->retain = $retain;
-
-        return $c;
+        return clone($this, ['retain' => $retain]);
     }
 
     /**
      * @param  array<string, mixed>|null  $props
      */
+    #[NoDiscard]
     public function withProperties(?array $props): self
     {
-        $c             = clone $this;
-        $c->properties = $props;
-
-        return $c;
+        return clone($this, ['properties' => $props]);
     }
 }

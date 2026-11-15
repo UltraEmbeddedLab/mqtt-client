@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **PHP 8.5 is now required.** Under the compatibility promise this is a minor change: on PHP 8.4 Composer keeps installing 2.0.x. CI runs on 8.5, the stock-image install check uses `php:8.5-cli`, and PHP 8.6 runs as an allowed-to-fail job so its deprecations surface before users meet them.
+- **Discarding a `with*()` result now warns.** Every wither on `Options`, `TlsOptions`, `SubscribeOptions` and `WillOptions` is a single PHP 8.5 `clone($this, [...])` and carries `#[\NoDiscard]`, so `$options->withKeepAlive(30);` — which never had any effect — emits a warning instead of silently doing nothing. A test pins the attribute on every wither.
+- **`ping()` processes whatever arrives before the PINGRESP** rather than reading two raw bytes and throwing `ProtocolError` when they were not a PINGRESP. See the Fixed entry below.
+- **`loopOnce()` may return `false` before its timeout** when that timeout runs past the moment the next PINGREQ is due, so the next call can send it. Callers that loop are unaffected.
+- Development dependencies: Pest 5.3, PHPStan 2.3, Rector 2.8, Pint 1.32, Symfony components 8.1.11 (clears CVE-2026-109413 and CVE-2026-123792 in the dev-only `symfony/yaml`). PHPStan, Pint and Rector now target PHP 8.5; Rector applies its PHP 8.5 set.
+
+### Fixed — the receive path
+
+- **A timeout in the middle of a packet desynchronised the connection for good.** A frame was read in three or more socket reads, only the first inside the `try`, and `TcpTransport::readExact()` threw away whatever it had read when its deadline passed. One slow segment — a large payload over a congested link — and the next read started mid-packet, every later frame boundary was wrong, and `isOpen()` still said true so auto-reconnect never fired. `TcpTransport` and `WsTransport` now keep partially received bytes across a `Timeout`, `Client` keeps a half-read fixed header across `loopOnce()` calls, and a whole frame shares one deadline.
+- **`tick()` never read a byte.** `readExact(n, 0.0)` checked its deadline before calling `select()`, so a zero timeout failed without looking at the socket and the documented non-blocking integration path delivered nothing. A zero timeout is now a poll.
+- **`awaitMessage(null)` dropped quiet connections every five seconds.** `readExact(n, null)` skipped `select()` and relied on the 5-second stream timeout set in `open()`, which surfaced as a fatal `TransportError`; the client closed the transport. Even where it did not, the blocking read never returned to send a PINGREQ. An unbounded wait now blocks in `select()` and wakes when Keep Alive housekeeping is due.
+- **`ping()` ate the head of the next packet.** On a subscribed connection a PUBLISH arriving before the PINGRESP lost its first two bytes and the stream desynchronised. `ping()` now pumps the receive loop, so the PUBLISH is delivered and the PINGRESP still completes the ping.
+- **Acknowledgements went into four single-slot registers**, so a `publish()` from inside an `onMessage()` handler overwrote the outer `publish()`'s PUBACK; the outer call resent with DUP until it timed out for a message the broker had acknowledged. Acknowledgements are now matched by packet identifier, and one that nobody waits for — a PUBACK arriving after its `publish()` gave up — is dropped instead of kept.
+- **A large packet arriving slowly could get a healthy connection condemned.** A PINGREQ sent while a body was still arriving has its PINGRESP queued behind that body, and the bytes already received were invisible to the liveness check until the last one landed — a slow transfer straddling a ping was torn down as a silent link. Once a body read times out, the rest is read in slices (256 B, doubling while data flows), each counting as proof of life. A link that stalls mid-packet is still condemned on the next Keep Alive cycle, like an idle one.
+- **`ping()` let housekeeping apply a shorter deadline to its own PINGREQ.** With a `ping()` timeout longer than `pingResponseTimeout` the client closed the connection and `ping()` threw `TransportError`. `ping()` now owns the round trip: it throws `Timeout` after its own timeout and leaves the link up.
+- **A failed `connect()` left the transport open.** After a CONNACK timeout or a malformed first packet, `isOpen()` stayed true, so auto-reconnect never retried and the next `loopOnce()` read on as if connected. Any failure after the socket opens now closes it.
+- **WebSocket frames were lost the same way.** Header, length, mask and payload were separate blocking reads; a timeout during the payload discarded the header. Frames are now parsed only once complete.
+- **Fragmented WebSocket messages desynchronised MQTT.** The first fragment entered the byte stream and its continuation frames were dropped. Binary continuations are now appended in order, a fragmented text message is kept out, and pings between fragments are answered. Reading many small packets out of one large frame is no longer quadratic.
+- **`InMemoryTransport` was quadratic in the bytes fed to it**: each read copied the whole remaining buffer. Consumer test suites that feed thousands of packets get faster.
+- PHP 8.5 deprecates `chr()` outside 0–255. Every call site is now provably in range — `InMemoryTransport`'s `feed*()` helpers reject an out-of-range reason code with `InvalidArgumentException` rather than masking it into a different, valid one.
+
+### Performance
+
+Measured with the two new benchmarks on PHP 8.5, old and new code alternated and the best of each round kept:
+
+| `benchmarks/inbound-throughput.php` — client µs per message | 2.0 | now |
+|---|---|---|
+| MQTT 3.1.1, QoS 0, 64 B | 4.6 | 3.8 |
+| MQTT 3.1.1, QoS 0, 1 KiB | 7.0 | 5.6 |
+| MQTT 5.0, QoS 0, 64 KiB | 126 | 95 |
+| MQTT 5.0, QoS 0, 1 MiB | 2,574 | 1,837 |
+
+| `benchmarks/hot-paths.php` | 2.0 | now |
+|---|---|---|
+| MQTT 5 PUBLISH decode, 1 MiB payload | 31.6 µs | 16.7 µs |
+| WebSocket frame encode, 16 KiB | 956 µs | 7.2 µs |
+| WebSocket frame encode, 1 MiB | 58.9 ms | 0.8 ms |
+
+Where it came from:
+
+- `TcpTransport` reads up to 64 KiB per system call into its own buffer, so the several small reads of a packet header are served from memory, and it asks PHP for 64 KiB stream chunks instead of 8 KiB — a 1 MiB packet took 128 `recv()` calls and now takes 16. A body read is returned without a copy when it fills the buffer exactly.
+- The MQTT 5 decoder copied the rest of the packet — payload included — to read each one-to-four byte property length. `Bytes::decodeVarInt()` now takes an offset and reads in place.
+- The `PacketReceived` event concatenated header and body, a full copy of every inbound packet, even with no dispatcher configured. Optional collaborators (`events`, `metrics`, flow control, topic aliases) are now called with `?->`, which also skips evaluating the arguments when they are absent.
+- WebSocket masking was a `chr()`/`ord()` loop per byte in PHP; it is now one string XOR.
+
+### Deprecated
+
+- `Transport\TransportScheme` — referenced nowhere; there is no URI parsing that selects a transport. Scheduled for removal in 3.0.
+
+### Added
+
+- `Bytes::decodeVarInt()` takes an optional `$offset` (new trailing parameter).
+- `benchmarks/inbound-throughput.php` — the whole receive path through public API over a real loopback socket, timing the client only; `benchmarks/hot-paths.php` — MQTT 5 decode and WebSocket masking.
+
 ### Fixed — the client can now hold a connection open
 
 Four defects that only show up on a long-lived connection, which is what this library is for.

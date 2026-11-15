@@ -52,9 +52,8 @@ final class Decoder implements DecoderInterface
         $offset   = 2;
         $propsMap = null;
         if (isset($packetBody[$offset])) {
-            $rest     = substr($packetBody, $offset);
             $consumed = 0;
-            $len      = Bytes::decodeVarInt($rest, $consumed);
+            $len      = Bytes::decodeVarInt($packetBody, $consumed, $offset);
             if ($consumed + $offset + $len > strlen($packetBody)) {
                 throw new ProtocolError('Malformed CONNACK: properties truncated');
             }
@@ -259,9 +258,8 @@ final class Decoder implements DecoderInterface
         $pid    = $arr[1];
         $offset = 2;
         // Properties
-        $rest     = substr($packetBody, $offset);
         $consumed = 0;
-        $propLen  = Bytes::decodeVarInt($rest, $consumed);
+        $propLen  = Bytes::decodeVarInt($packetBody, $consumed, $offset);
         $offset += $consumed;
         if ($offset + $propLen > strlen($packetBody)) {
             throw new ProtocolError('SUBACK properties truncated');
@@ -308,9 +306,8 @@ final class Decoder implements DecoderInterface
         }
 
         // Properties
-        $rest     = substr($packetBody, $offset);
         $consumed = 0;
-        $propLen  = Bytes::decodeVarInt($rest, $consumed);
+        $propLen  = Bytes::decodeVarInt($packetBody, $consumed, $offset);
         $offset += $consumed;
         if ($offset + $propLen > strlen($packetBody)) {
             throw new ProtocolError('PUBLISH properties truncated');
@@ -358,9 +355,8 @@ final class Decoder implements DecoderInterface
         $offset = 2;
 
         // Properties
-        $rest     = substr($packetBody, $offset);
         $consumed = 0;
-        $propLen  = Bytes::decodeVarInt($rest, $consumed);
+        $propLen  = Bytes::decodeVarInt($packetBody, $consumed, $offset);
         $offset += $consumed;
         if ($offset + $propLen > strlen($packetBody)) {
             throw new ProtocolError('UNSUBACK properties truncated');
@@ -500,9 +496,8 @@ final class Decoder implements DecoderInterface
 
         $propsMap = null;
         if ($offset < strlen($packetBody)) {
-            $rest     = substr($packetBody, $offset);
             $consumed = 0;
-            $propLen  = Bytes::decodeVarInt($rest, $consumed);
+            $propLen  = Bytes::decodeVarInt($packetBody, $consumed, $offset);
             $offset += $consumed;
             if ($offset + $propLen > strlen($packetBody)) {
                 throw new ProtocolError("$packetName properties truncated");
@@ -538,9 +533,8 @@ final class Decoder implements DecoderInterface
         // Properties
         $propsMap = null;
         if ($offset < strlen($packetBody)) {
-            $rest     = substr($packetBody, $offset);
             $consumed = 0;
-            $propLen  = Bytes::decodeVarInt($rest, $consumed);
+            $propLen  = Bytes::decodeVarInt($packetBody, $consumed, $offset);
             $offset += $consumed;
             if ($offset + $propLen > strlen($packetBody)) {
                 throw new ProtocolError('DISCONNECT properties truncated');

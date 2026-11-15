@@ -5,10 +5,13 @@ declare(strict_types=1);
 namespace ScienceStories\Mqtt\Client;
 
 use InvalidArgumentException;
+use NoDiscard;
 use ScienceStories\Mqtt\Contract\SessionStoreInterface;
 use ScienceStories\Mqtt\Protocol\MqttVersion;
 
 use function max;
+use function min;
+use function trim;
 
 /**
  * Options encapsulate connection settings for the MQTT client.
@@ -111,42 +114,38 @@ final class Options
      *
      * @throws InvalidArgumentException if not greater than zero
      */
+    #[NoDiscard]
     public function withPingResponseTimeout(float $seconds): self
     {
         if ($seconds <= 0) {
             throw new InvalidArgumentException("Ping response timeout must be greater than 0, got $seconds");
         }
 
-        $c                      = clone $this;
-        $c->pingResponseTimeout = $seconds;
-
-        return $c;
+        return clone($this, ['pingResponseTimeout' => $seconds]);
     }
 
+    #[NoDiscard]
     public function withHost(string $host, int $port = 1883): self
     {
-        $c       = clone $this;
-        $c->host = $host;
-        $c->port = $port;
-
-        return $c;
+        return clone($this, [
+            'host' => $host,
+            'port' => $port,
+        ]);
     }
 
+    #[NoDiscard]
     public function withClientId(string $id): self
     {
-        $c           = clone $this;
-        $c->clientId = $id;
-
-        return $c;
+        return clone($this, ['clientId' => $id]);
     }
 
+    #[NoDiscard]
     public function withUser(string $username, ?string $password = null): self
     {
-        $c           = clone $this;
-        $c->username = $username;
-        $c->password = $password;
-
-        return $c;
+        return clone($this, [
+            'username' => $username,
+            'password' => $password,
+        ]);
     }
 
     /**
@@ -157,6 +156,7 @@ final class Options
      *
      * @throws InvalidArgumentException if out of range
      */
+    #[NoDiscard]
     public function withKeepAlive(int $seconds): self
     {
         if ($seconds < 0 || $seconds > self::MAXIMUM_KEEP_ALIVE) {
@@ -165,82 +165,62 @@ final class Options
             );
         }
 
-        $c            = clone $this;
-        $c->keepAlive = $seconds;
-
-        return $c;
+        return clone($this, ['keepAlive' => $seconds]);
     }
 
+    #[NoDiscard]
     public function withCleanSession(bool $flag): self
     {
-        $c               = clone $this;
-        $c->cleanSession = $flag;
-
-        return $c;
+        return clone($this, ['cleanSession' => $flag]);
     }
 
     /**
      * MQTT 5 Session Expiry Interval (seconds). Null to omit property; 0 to expire immediately; >0 for persistent session.
      */
+    #[NoDiscard]
     public function withSessionExpiry(?int $seconds): self
     {
-        $c = clone $this;
-        if ($seconds !== null) {
-            if ($seconds < 0) {
-                $seconds = 0;
-            }
-            // Clamp to 32-bit unsigned max per MQTT 5
-            if ($seconds > 0xFFFFFFFF) {
-                $seconds = 0xFFFFFFFF;
-            }
-        }
-        $c->sessionExpiry = $seconds;
-
-        return $c;
+        // Clamp to the 32-bit unsigned range of the MQTT 5 property.
+        return clone($this, ['sessionExpiry' => $seconds === null ? null : max(0, min($seconds, 0xFFFFFFFF))]);
     }
 
     /**
      * @param  TlsOptions|array<string, mixed>|null  $options  TlsOptions object or raw stream context array
      */
+    #[NoDiscard]
     public function withTls(TlsOptions|array|null $options = null): self
     {
-        $c             = clone $this;
-        $c->useTls     = true;
-        $c->tlsOptions = $options;
-
-        return $c;
+        return clone($this, [
+            'useTls'     => true,
+            'tlsOptions' => $options,
+        ]);
     }
 
     /**
      * Timeout in seconds for waiting on QoS 1/2 acknowledgments before resending.
      */
+    #[NoDiscard]
     public function withAckTimeout(float $seconds): self
     {
-        $c             = clone $this;
-        $c->ackTimeout = max(0.1, $seconds);
-
-        return $c;
+        return clone($this, ['ackTimeout' => max(0.1, $seconds)]);
     }
 
     /**
      * Maximum number of resend attempts for unacknowledged QoS 1/2 messages.
      */
+    #[NoDiscard]
     public function withMaxResendAttempts(int $attempts): self
     {
-        $c                    = clone $this;
-        $c->maxResendAttempts = max(0, $attempts);
-
-        return $c;
+        return clone($this, ['maxResendAttempts' => max(0, $attempts)]);
     }
 
+    #[NoDiscard]
     public function withWill(?WillOptions $will): self
     {
-        $c       = clone $this;
-        $c->will = $will;
-
-        return $c;
+        return clone($this, ['will' => $will]);
     }
 
+    #[NoDiscard]
     public function withAutoReconnect(
         bool $enable = true,
         int $maxAttempts = 5,
@@ -248,28 +228,24 @@ final class Options
         float $maxDelay = 5.0,
         float $jitter = 0.2,
     ): self {
-        $c                       = clone $this;
-        $c->autoReconnect        = $enable;
-        $c->reconnectMaxAttempts = $maxAttempts;
-        $c->reconnectBaseDelay   = $baseDelay;
-        $c->reconnectMaxDelay    = $maxDelay;
-        $c->reconnectJitter      = $jitter;
-
-        return $c;
+        return clone($this, [
+            'autoReconnect'        => $enable,
+            'reconnectMaxAttempts' => $maxAttempts,
+            'reconnectBaseDelay'   => $baseDelay,
+            'reconnectMaxDelay'    => $maxDelay,
+            'reconnectJitter'      => $jitter,
+        ]);
     }
 
     /**
      * Add a single client-side delivery filter (MQTT topic filter syntax: + and # supported).
      */
+    #[NoDiscard]
     public function withMessageFilter(string $filter): self
     {
         $f = trim($filter);
-        $c = clone $this;
-        if ($f !== '') {
-            $c->messageFilters[] = $f;
-        }
 
-        return $c;
+        return $f === '' ? clone $this : clone($this, ['messageFilters' => [...$this->messageFilters, $f]]);
     }
 
     /**
@@ -277,6 +253,7 @@ final class Options
      *
      * @param  list<string>  $filters
      */
+    #[NoDiscard]
     public function withMessageFilters(array $filters): self
     {
         $out = [];
@@ -286,10 +263,7 @@ final class Options
                 $out[] = $s;
             }
         }
-        $c                 = clone $this;
-        $c->messageFilters = $out;
-
-        return $c;
+        return clone($this, ['messageFilters' => $out]);
     }
 
     /**
@@ -300,18 +274,10 @@ final class Options
      *
      * @param int $maximum Maximum topic aliases (0 = disabled, max 65535)
      */
+    #[NoDiscard]
     public function withTopicAliasMaximum(int $maximum): self
     {
-        $c = clone $this;
-        if ($maximum < 0) {
-            $maximum = 0;
-        }
-        if ($maximum > 65535) {
-            $maximum = 65535;
-        }
-        $c->topicAliasMaximum = $maximum;
-
-        return $c;
+        return clone($this, ['topicAliasMaximum' => max(0, min($maximum, 65535))]);
     }
 
     /**
@@ -323,18 +289,10 @@ final class Options
      *
      * @param int $maximum Maximum concurrent QoS 1/2 messages (1-65535)
      */
+    #[NoDiscard]
     public function withReceiveMaximum(int $maximum): self
     {
-        $c = clone $this;
-        if ($maximum < 1) {
-            $maximum = 1;
-        }
-        if ($maximum > 65535) {
-            $maximum = 65535;
-        }
-        $c->receiveMaximum = $maximum;
-
-        return $c;
+        return clone($this, ['receiveMaximum' => max(1, min($maximum, 65535))]);
     }
 
     /**
@@ -345,12 +303,10 @@ final class Options
      *
      * @param SessionStoreInterface|null $store Session storage implementation
      */
+    #[NoDiscard]
     public function withSessionStore(?SessionStoreInterface $store): self
     {
-        $c               = clone $this;
-        $c->sessionStore = $store;
-
-        return $c;
+        return clone($this, ['sessionStore' => $store]);
     }
 
     /**
@@ -362,12 +318,10 @@ final class Options
      *
      * @param int $size Cache size (minimum 16, default 256)
      */
+    #[NoDiscard]
     public function withQos1DeduplicationSize(int $size): self
     {
-        $c                        = clone $this;
-        $c->qos1DeduplicationSize = max(16, $size);
-
-        return $c;
+        return clone($this, ['qos1DeduplicationSize' => max(16, $size)]);
     }
 
     /**
@@ -375,12 +329,10 @@ final class Options
      *
      * @param RateLimiter|null $limiter Rate limiter instance (null to disable)
      */
+    #[NoDiscard]
     public function withRateLimiter(?RateLimiter $limiter): self
     {
-        $c              = clone $this;
-        $c->rateLimiter = $limiter;
-
-        return $c;
+        return clone($this, ['rateLimiter' => $limiter]);
     }
 
     /**
@@ -388,12 +340,10 @@ final class Options
      *
      * @param int $maxSize Maximum number of queued messages (0 = disabled)
      */
+    #[NoDiscard]
     public function withOfflineQueue(int $maxSize): self
     {
-        $c                   = clone $this;
-        $c->offlineQueueSize = max(0, $maxSize);
-
-        return $c;
+        return clone($this, ['offlineQueueSize' => max(0, $maxSize)]);
     }
 
     /**
@@ -407,6 +357,7 @@ final class Options
      *
      * @throws InvalidArgumentException if out of range
      */
+    #[NoDiscard]
     public function withMaximumPacketSize(int $bytes): self
     {
         if ($bytes < 1 || $bytes > self::PROTOCOL_MAXIMUM_PACKET_SIZE) {
@@ -415,10 +366,7 @@ final class Options
             );
         }
 
-        $c                    = clone $this;
-        $c->maximumPacketSize = $bytes;
-
-        return $c;
+        return clone($this, ['maximumPacketSize' => $bytes]);
     }
 
     /**
@@ -432,15 +380,13 @@ final class Options
      *
      * @throws InvalidArgumentException if negative
      */
+    #[NoDiscard]
     public function withInboundQueueSize(int $maxMessages): self
     {
         if ($maxMessages < 0) {
             throw new InvalidArgumentException("Inbound queue size cannot be negative, got $maxMessages");
         }
 
-        $c                   = clone $this;
-        $c->inboundQueueSize = $maxMessages;
-
-        return $c;
+        return clone($this, ['inboundQueueSize' => $maxMessages]);
     }
 }

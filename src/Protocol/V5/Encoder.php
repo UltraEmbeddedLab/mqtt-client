@@ -14,16 +14,21 @@ use ScienceStories\Mqtt\Protocol\Packet\PacketType;
 use ScienceStories\Mqtt\Protocol\Packet\Publish;
 use ScienceStories\Mqtt\Util\Bytes;
 
+use function array_is_list;
 use function array_key_exists;
 use function chr;
 use function count;
+use function get_debug_type;
 use function is_array;
 use function is_bool;
 use function is_float;
 use function is_int;
+use function is_numeric;
 use function is_object;
 use function is_resource;
 use function is_string;
+use function method_exists;
+use function pack;
 use function sprintf;
 use function strlen;
 
@@ -270,28 +275,20 @@ final class Encoder implements EncoderInterface
                 $qos = 2;
             }
 
-            // Build subscription options byte (MQTT 5.0 feature)
-            $opts = 0;
-
-            // Bits 0-1: QoS level
-            $opts |= ($qos & 0x03);
-
-            // Apply MQTT 5.0 subscription options if provided
+            // Subscription Options byte (MQTT-3.8.3.1). The fields occupy disjoint bits,
+            // so they are summed rather than OR-ed: the result is the same byte, and a sum
+            // of bounded terms is something static analysis can prove fits in 0..255.
+            //   bits 0-1  maximum QoS
+            //   bit  2    No Local
+            //   bit  3    Retain As Published
+            //   bits 4-5  Retain Handling (0 = send, 1 = send if new, 2 = do not send)
+            $opts = $qos;
             if ($options instanceof SubscribeOptions) {
-                // Bit 2: No Local flag (don't receive own publications)
-                if ($options->noLocal) {
-                    $opts |= 0x04;
-                }
-                // Bit 3: Retain As Published flag (forward retain flag)
-                if ($options->retainAsPublished) {
-                    $opts |= 0x08;
-                }
-                // Bits 4-5: Retain Handling (0=send, 1=send if new, 2=don't send)
-                $rh = $options->retainHandling & 0x03;
-                $opts |= ($rh << 4);
+                $opts += ($options->noLocal ? 0x04 : 0)
+                    + ($options->retainAsPublished ? 0x08 : 0)
+                    + (($options->retainHandling & 0x03) * 16);
             }
 
-            // Encode: UTF-8 string (2-byte length + bytes) + 1-byte subscription options
             $payload .= Bytes::encodeString($filter).chr($opts);
         }
 
@@ -495,6 +492,7 @@ final class Encoder implements EncoderInterface
         return $i;
     }
 
+    /** @return int<0, 255> */
     private function toByte(mixed $v): int
     {
         $this->rejectInvalidType($v);

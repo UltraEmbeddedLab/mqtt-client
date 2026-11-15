@@ -1,6 +1,6 @@
 {
   "preset": "psr12",
-  "php_version": 80400,
+  "php_version": 80500,
   "riskier": true,
   "rules": {
     "declare_strict_types": true,

@@ -156,11 +156,16 @@ it('publishes the reading to the telemetry topic', function (): void {
 
 ## What it does not do
 
-`InMemoryTransport` serves a read only when the full requested length is already buffered.
-A real socket delivers a frame in arbitrary chunks, so this double cannot reproduce
-partial-read behaviour — which is exactly where the known mid-frame timeout bug lives (see
-[ROADMAP.md](../ROADMAP.md)). For that class of test, use a `stream_socket_pair()` against
-`TcpTransport` directly, or the Mosquitto in `docker-compose.yml`.
+`InMemoryTransport` serves a read only when the full requested length is already buffered,
+and consumes nothing otherwise — the same contract the real transports keep. You can still
+test a packet that arrives in pieces: `feed()` part of it, pump (the call returns `false`),
+`feed()` the rest, pump again. The client resumes the half-read packet.
+
+What it cannot reproduce is timing: a socket that delivers half a body and then goes quiet
+for a while, `select()` waking, a deadline passing mid-read. For that class of test, open a
+`TcpTransport` to a `stream_socket_server()` on 127.0.0.1 in the same process (this
+project's `tests/Support/Loopback.php` does exactly that), or use the Mosquitto in
+`docker-compose.yml`.
 
 It also does not validate what the client sends. It records bytes; asserting they are
 correct is your test's job.

@@ -30,6 +30,13 @@ interface TransportInterface
     /**
      * Read exactly $length bytes from the transport.
      *
+     * The client relies on three properties, which every shipped transport has:
+     * - Atomic: on Timeout nothing is consumed. Bytes that arrived before the deadline are
+     *   kept and returned by a later call, so a timeout mid-packet loses nothing.
+     * - A $timeoutSec of 0.0 is a poll: look at what is already available, then give up.
+     *   It must not fail before looking.
+     * - null blocks until the bytes arrive.
+     *
      * @throws Timeout if the read times out
      * @throws TransportError if the connection is closed or invalid
      */

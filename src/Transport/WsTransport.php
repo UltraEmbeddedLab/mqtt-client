@@ -21,6 +21,7 @@ use function feof;
 use function floor;
 use function fread;
 use function fwrite;
+use function intdiv;
 use function is_resource;
 use function max;
 use function ord;
@@ -29,28 +30,32 @@ use function random_bytes;
 use function sha1;
 use function sprintf;
 use function str_contains;
+use function str_repeat;
 use function stream_context_create;
 use function stream_select;
 use function stream_set_blocking;
 use function stream_set_timeout;
 use function stream_socket_client;
 use function strlen;
+use function strpos;
 use function substr;
 use function trim;
+use function unpack;
 use function usleep;
 
 /**
- * WebSocket transport for MQTT over WebSockets (ws:// and wss://).
+ * WebSocket transport for MQTT over WebSockets (ws://).
  *
- * Implements RFC 6455 WebSocket framing over a TCP/TLS stream,
- * using the 'mqtt' subprotocol as required by the MQTT specification.
+ * Implements RFC 6455 WebSocket framing over a TCP stream, using the 'mqtt' subprotocol
+ * as required by the MQTT specification.
  *
  * Supports:
- * - ws:// (plain WebSocket)
- * - Wss:// (WebSocket over TLS)
- * - Custom URI paths (default: /mqtt)
- * - Fragmented message reassembly
- * - Ping/pong keepalive frames
+ * - ws:// (plain WebSocket), custom URI paths (default: /mqtt)
+ * - binary messages split across continuation frames
+ * - ping/pong control frames, including between fragments
+ *
+ * Not supported: wss://. enableTls() runs after the HTTP upgrade, which is too late for
+ * a TLS-terminated WebSocket endpoint.
  */
 final class WsTransport implements TransportInterface
 {
@@ -62,6 +67,10 @@ final class WsTransport implements TransportInterface
      * fail after the server has already returned a valid 101.
      */
     private const string WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+
+    private const int OPCODE_CONTINUATION = 0x00;
+
+    private const int OPCODE_TEXT = 0x01;
 
     private const int OPCODE_BINARY = 0x02;
 
@@ -76,6 +85,28 @@ final class WsTransport implements TransportInterface
 
     /** Buffer for reassembling fragmented MQTT data */
     private string $mqttBuffer = '';
+
+    /** Position of the first unread byte in $mqttBuffer. */
+    private int $mqttOffset = 0;
+
+    /**
+     * Opcode of the data message whose fragments are still arriving, or null.
+     *
+     * Continuation frames carry opcode 0; what they continue is only known from the frame
+     * that started the message. MQTT is a byte stream, so a binary message's fragments are
+     * simply appended in order — but a fragmented text message must not leak into it.
+     */
+    private ?int $fragmentOpcode = null;
+
+    /**
+     * Bytes read from the socket that do not yet form a complete WebSocket frame.
+     *
+     * A frame is parsed only once all of it is here, so a timeout part-way through one
+     * leaves these bytes for the next call. Reading header, length, mask and payload with
+     * separate blocking reads — as before — lost the header whenever the payload read timed
+     * out, and every later frame boundary was wrong.
+     */
+    private string $rawBuffer = '';
 
     /**
      * @param  string  $path  HTTP path used for the Upgrade request
@@ -121,9 +152,12 @@ final class WsTransport implements TransportInterface
         $usec = (int) floor(($timeoutSec - $sec) * 1_000_000);
         @stream_set_timeout($stream, $sec, $usec);
 
-        $this->stream     = $stream;
-        $this->tlsEnabled = false;
-        $this->mqttBuffer = '';
+        $this->stream         = $stream;
+        $this->tlsEnabled     = false;
+        $this->mqttBuffer     = '';
+        $this->mqttOffset     = 0;
+        $this->rawBuffer      = '';
+        $this->fragmentOpcode = null;
 
         // Perform WebSocket handshake
         $this->performHandshake($host, $port);
@@ -160,23 +194,28 @@ final class WsTransport implements TransportInterface
 
         $deadline = $timeoutSec !== null ? (Clock::now() + $timeoutSec) : null;
 
-        // Drain from mqttBuffer first
-        while (strlen($this->mqttBuffer) < $length) {
-            if ($deadline !== null) {
-                $timeLeft = $deadline - Clock::now();
-                if ($timeLeft <= 0) {
-                    throw new Timeout('WebSocket: Read timed out');
-                }
-            }
-
+        // Whole frames only: readFrame() either appends a complete payload or throws with
+        // the partial frame still in $rawBuffer, so this is atomic like TcpTransport.
+        if (strlen($this->mqttBuffer) - $this->mqttOffset < $length && $this->mqttOffset > 0) {
+            // Drop the consumed prefix once, before growing the buffer — cutting it off on
+            // every read copied the remainder each time, quadratic for a large frame that
+            // carries many small MQTT packets.
+            $this->mqttBuffer = substr($this->mqttBuffer, $this->mqttOffset);
+            $this->mqttOffset = 0;
+        }
+        while (strlen($this->mqttBuffer) - $this->mqttOffset < $length) {
             $payload = $this->readFrame($deadline);
             if ($payload !== null) {
                 $this->mqttBuffer .= $payload;
             }
         }
 
-        $result           = substr($this->mqttBuffer, 0, $length);
-        $this->mqttBuffer = substr($this->mqttBuffer, $length);
+        $result = substr($this->mqttBuffer, $this->mqttOffset, $length);
+        $this->mqttOffset += $length;
+        if ($this->mqttOffset === strlen($this->mqttBuffer)) {
+            $this->mqttBuffer = '';
+            $this->mqttOffset = 0;
+        }
 
         return $result;
     }
@@ -193,10 +232,13 @@ final class WsTransport implements TransportInterface
             }
             @fclose($this->stream);
         }
-        $this->stream     = null;
-        $this->context    = null;
-        $this->tlsEnabled = false;
-        $this->mqttBuffer = '';
+        $this->stream         = null;
+        $this->context        = null;
+        $this->tlsEnabled     = false;
+        $this->mqttBuffer     = '';
+        $this->mqttOffset     = 0;
+        $this->rawBuffer      = '';
+        $this->fragmentOpcode = null;
     }
 
     public function isOpen(): bool
@@ -244,16 +286,18 @@ final class WsTransport implements TransportInterface
 
         $this->rawWrite($request);
 
-        // Read HTTP response
-        $response = '';
+        // Read the HTTP response. Anything after the blank line is already WebSocket data
+        // and stays in $rawBuffer for readFrame().
         $deadline = Clock::now() + 5.0;
-        while (!str_contains($response, "\r\n\r\n")) {
-            if (Clock::now() > $deadline) {
+        while (($end = strpos($this->rawBuffer, "\r\n\r\n")) === false) {
+            try {
+                $this->fillRaw(strlen($this->rawBuffer) + 1, $deadline);
+            } catch (Timeout) {
                 throw new TransportError('WebSocket: Handshake timed out');
             }
-            $chunk = $this->rawRead(1, $deadline);
-            $response .= $chunk;
         }
+        $response        = substr($this->rawBuffer, 0, $end + 4);
+        $this->rawBuffer = substr($this->rawBuffer, $end + 4);
 
         // Validate response
         $lines      = explode("\r\n", $response);
@@ -284,85 +328,84 @@ final class WsTransport implements TransportInterface
 
     /**
      * Encode data into a WebSocket frame (client-to-server, always masked).
+     *
+     * @param  self::OPCODE_*  $opcode
+     *
      * @throws RandomException
      */
     private function encodeFrame(string $payload, int $opcode): string
     {
         $length = strlen($payload);
-        $frame  = chr(0x80 | $opcode); // FIN + opcode
+        $frame  = chr(0x80 + $opcode); // FIN + opcode
 
         // Mask bit is always set for client-to-server
         if ($length < 126) {
-            $frame .= chr(0x80 | $length);
+            $frame .= chr(0x80 + $length);
         } elseif ($length < 65536) {
-            $frame .= chr(0x80 | 126) . pack('n', $length);
+            $frame .= chr(0x80 | 126).pack('n', $length);
         } else {
-            $frame .= chr(0x80 | 127) . pack('J', $length);
+            $frame .= chr(0x80 | 127).pack('J', $length);
         }
 
-        // Masking key
         $mask = random_bytes(4);
-        $frame .= $mask;
 
-        // Mask payload
-        for ($i = 0; $i < $length; $i++) {
-            $frame .= chr(ord($payload[$i]) ^ ord($mask[$i % 4]));
+        return $frame.$mask.$this->applyMask($payload, $mask);
+    }
+
+    /**
+     * XOR $payload with the repeating 4-byte $mask (RFC 6455 §5.3).
+     *
+     * One string-wide XOR in C rather than a chr()/ord() round trip per byte in PHP: the
+     * per-byte loop this replaces cost about a millisecond per 64 KiB, which made the
+     * WebSocket transport unusable for anything but small messages.
+     */
+    private function applyMask(string $payload, string $mask): string
+    {
+        $length = strlen($payload);
+        if ($length === 0) {
+            return '';
         }
 
-        return $frame;
+        // XOR of two strings yields the length of the shorter one, so the key only has to
+        // cover the payload.
+        return $payload ^ str_repeat($mask, intdiv($length + 3, 4));
     }
 
     /**
      * Read and decode a single WebSocket frame, returning the payload for binary frames.
      * Handles ping/pong/close control frames transparently.
+     *
+     * Nothing is consumed from $rawBuffer until the whole frame is there, so a Timeout
+     * leaves the stream exactly where it was.
+     *
      * @throws RandomException
+     * @throws Timeout
      */
     private function readFrame(?float $deadline): ?string
     {
-        $stream = $this->stream;
-        if (!is_resource($stream)) {
-            throw new TransportError('Invalid stream resource');
-        }
+        // Header: 2 bytes, then a 0/2/8-byte extended length, then a 0/4-byte mask.
+        $this->fillRaw(2, $deadline);
+        $b0 = ord($this->rawBuffer[0]);
+        $b1 = ord($this->rawBuffer[1]);
 
-        // Wait for data
-        if ($deadline !== null) {
-            $timeLeft = $deadline - Clock::now();
-            if ($timeLeft <= 0) {
-                throw new Timeout('WebSocket: Read timed out');
-            }
-
-            $r    = [$stream];
-            $w    = null;
-            $e    = null;
-            $sec  = (int) floor($timeLeft);
-            $usec = (int) floor(($timeLeft - $sec) * 1_000_000);
-            $n    = @stream_select($r, $w, $e, $sec, $usec);
-            if ($n === false) {
-                throw new TransportError('stream_select failed');
-            }
-            if ($n === 0) {
-                throw new Timeout('WebSocket: Read timed out');
-            }
-        }
-
-        // Read frame header (2 bytes minimum)
-        $header = $this->rawRead(2, $deadline);
-        $b0     = ord($header[0]);
-        $b1     = ord($header[1]);
-
+        $final      = ($b0 & 0x80) !== 0;
         $opcode     = $b0 & 0x0F;
         $masked     = ($b1 & 0x80) !== 0;
         $payloadLen = $b1 & 0x7F;
+        $headerLen  = 2 + match ($payloadLen) {
+            126     => 2,
+            127     => 8,
+            default => 0,
+        } + ($masked ? 4 : 0);
 
+        $this->fillRaw($headerLen, $deadline);
         if ($payloadLen === 126) {
-            $ext = $this->rawRead(2, $deadline);
             /** @var array{1: int} $unpacked */
-            $unpacked   = unpack('n', $ext);
+            $unpacked   = unpack('n', $this->rawBuffer, 2);
             $payloadLen = $unpacked[1];
         } elseif ($payloadLen === 127) {
-            $ext = $this->rawRead(8, $deadline);
             /** @var array{1: int} $unpacked */
-            $unpacked   = unpack('J', $ext);
+            $unpacked   = unpack('J', $this->rawBuffer, 2);
             $payloadLen = $unpacked[1];
         }
 
@@ -376,26 +419,30 @@ final class WsTransport implements TransportInterface
             throw new ProtocolError("WebSocket frame of $payloadLen bytes exceeds the maximum of $this->maxFrameSize");
         }
 
-        $mask = '';
+        $this->fillRaw($headerLen + $payloadLen, $deadline);
+        $payload = substr($this->rawBuffer, $headerLen, $payloadLen);
         if ($masked) {
-            $mask = $this->rawRead(4, $deadline);
+            $payload = $this->applyMask($payload, substr($this->rawBuffer, $headerLen - 4, 4));
         }
+        $this->rawBuffer = substr($this->rawBuffer, $headerLen + $payloadLen);
 
-        $payload = '';
-        if ($payloadLen > 0) {
-            $payload = $this->rawRead((int) $payloadLen, $deadline);
-            if ($masked) {
-                for ($i = 0; $i < $payloadLen; $i++) {
-                    $payload[$i] = chr(ord($payload[$i]) ^ ord($mask[$i % 4]));
-                }
+        // A continuation frame belongs to whichever data message is in progress. Control
+        // frames (ping, pong, close) may arrive between fragments and change nothing here.
+        $messageOpcode = $opcode;
+        if ($opcode === self::OPCODE_CONTINUATION) {
+            $messageOpcode = $this->fragmentOpcode;
+            if ($final) {
+                $this->fragmentOpcode = null;
             }
+        } elseif ($opcode === self::OPCODE_BINARY || $opcode === self::OPCODE_TEXT) {
+            $this->fragmentOpcode = $final ? null : $opcode;
         }
 
-        return match ($opcode) {
+        return match ($messageOpcode) {
             self::OPCODE_BINARY => $payload,
             self::OPCODE_PING   => $this->handlePing($payload),
             self::OPCODE_CLOSE  => throw new TransportError('WebSocket: Connection closed by server'),
-            default             => null, // text frames, continuation, etc.
+            default             => null, // text messages, pongs, unknown opcodes
         };
     }
 
@@ -439,21 +486,40 @@ final class WsTransport implements TransportInterface
         return $total;
     }
 
-    private function rawRead(int $length, ?float $deadline): string
+    /**
+     * Grow $rawBuffer until it holds at least $length bytes, keeping them all on Timeout.
+     *
+     * @throws Timeout
+     */
+    private function fillRaw(int $length, ?float $deadline): void
     {
         $stream = $this->stream;
         if (!is_resource($stream)) {
             throw new TransportError('Invalid stream resource');
         }
 
-        $data = '';
-        while (strlen($data) < $length) {
-            if ($deadline !== null && Clock::now() > $deadline) {
+        while (strlen($this->rawBuffer) < $length) {
+            // Poll at least once even past the deadline, so a zero timeout returns data
+            // that is already waiting instead of failing outright.
+            $sec  = null;
+            $usec = 0;
+            if ($deadline !== null) {
+                $timeLeft = max(0.0, $deadline - Clock::now());
+                $sec      = (int) floor($timeLeft);
+                $usec     = (int) floor(($timeLeft - $sec) * 1_000_000);
+            }
+            $r = [$stream];
+            $w = null;
+            $e = null;
+            $n = @stream_select($r, $w, $e, $sec, $usec);
+            if ($n === false) {
+                throw new TransportError('stream_select failed');
+            }
+            if ($n === 0) {
                 throw new Timeout('WebSocket: Read timed out');
             }
 
-            $remaining = max(1, $length - strlen($data));
-            $chunk     = @fread($stream, $remaining);
+            $chunk = @fread($stream, max($length - strlen($this->rawBuffer), 65_536));
             if ($chunk === false) {
                 throw new TransportError('WebSocket: Read failed');
             }
@@ -465,9 +531,7 @@ final class WsTransport implements TransportInterface
 
                 continue;
             }
-            $data .= $chunk;
+            $this->rawBuffer .= $chunk;
         }
-
-        return $data;
     }
 }

@@ -7,6 +7,11 @@ namespace ScienceStories\Mqtt\Util;
 use InvalidArgumentException;
 use Random\RandomException;
 
+use function base64_encode;
+use function preg_replace;
+use function random_bytes;
+use function substr;
+
 /**
  * RandomId generates unique MQTT identifiers.
  * - Client IDs: random strings, alphanumeric (safe for brokers).
@@ -33,9 +38,7 @@ final class RandomId
         // Convert bytes to safe alphanumeric
         $base  = base64_encode($bytes);
         $clean = preg_replace('/[^a-zA-Z0-9]/', '', $base);
-        if ($clean === null) {
-            $clean = '';
-        }
+        $clean ??= '';
 
         return substr($clean, 0, $length);
     }

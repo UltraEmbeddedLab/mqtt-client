@@ -94,3 +94,18 @@ test('encode and decode varInt roundtrip', function (): void {
         expect($decoded)->toBe($original);
     }
 });
+
+test('decodeVarInt reads in place at an offset without copying the remainder', function (): void {
+    // The MQTT 5 decoder used to substr() the rest of the packet — payload included — just
+    // to decode a one-to-four byte property length.
+    $consumed = 0;
+    $value    = Bytes::decodeVarInt("\xFF\xFF\x80\x01payload", $consumed, 2);
+
+    expect($value)->toBe(128)
+        ->and($consumed)->toBe(2);
+});
+
+test('decodeVarInt rejects a negative offset instead of reading from the end', function (): void {
+    $consumed = 0;
+    Bytes::decodeVarInt("\x05", $consumed, -1);
+})->throws(ProtocolError::class);

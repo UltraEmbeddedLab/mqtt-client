@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace ScienceStories\Mqtt\Client;
 
+use NoDiscard;
+
 /**
  * Immutable TLS/SSL configuration for MQTT connections.
  *
@@ -45,86 +47,68 @@ final class TlsOptions
      * broker that genuinely cannot do TLS 1.2 — every version below it is deprecated by
      * RFC 8996.
      */
+    #[NoDiscard]
     public function withCryptoMethod(int $method): self
     {
-        $c               = clone $this;
-        $c->cryptoMethod = $method;
-
-        return $c;
+        return clone($this, ['cryptoMethod' => $method]);
     }
 
+    #[NoDiscard]
     public function withVerifyPeer(bool $verify): self
     {
-        $c             = clone $this;
-        $c->verifyPeer = $verify;
-
-        return $c;
+        return clone($this, ['verifyPeer' => $verify]);
     }
 
+    #[NoDiscard]
     public function withVerifyPeerName(bool $verify): self
     {
-        $c                 = clone $this;
-        $c->verifyPeerName = $verify;
-
-        return $c;
+        return clone($this, ['verifyPeerName' => $verify]);
     }
 
+    #[NoDiscard]
     public function withAllowSelfSigned(bool $allow): self
     {
-        $c                  = clone $this;
-        $c->allowSelfSigned = $allow;
-
-        return $c;
+        return clone($this, ['allowSelfSigned' => $allow]);
     }
 
+    #[NoDiscard]
     public function withCaFile(?string $path): self
     {
-        $c         = clone $this;
-        $c->caFile = $path;
-
-        return $c;
+        return clone($this, ['caFile' => $path]);
     }
 
+    #[NoDiscard]
     public function withCaPath(?string $path): self
     {
-        $c         = clone $this;
-        $c->caPath = $path;
-
-        return $c;
+        return clone($this, ['caPath' => $path]);
     }
 
+    #[NoDiscard]
     public function withClientCertificate(?string $certFile, ?string $keyFile = null, ?string $passphrase = null): self
     {
-        $c                                 = clone $this;
-        $c->clientCertificateFile          = $certFile;
-        $c->clientCertificateKeyFile       = $keyFile;
-        $c->clientCertificateKeyPassphrase = $passphrase;
-
-        return $c;
+        return clone($this, [
+            'clientCertificateFile'          => $certFile,
+            'clientCertificateKeyFile'       => $keyFile,
+            'clientCertificateKeyPassphrase' => $passphrase,
+        ]);
     }
 
+    #[NoDiscard]
     public function withPeerName(?string $name): self
     {
-        $c           = clone $this;
-        $c->peerName = $name;
-
-        return $c;
+        return clone($this, ['peerName' => $name]);
     }
 
+    #[NoDiscard]
     public function withAlpn(?string $protocol): self
     {
-        $c       = clone $this;
-        $c->alpn = $protocol;
-
-        return $c;
+        return clone($this, ['alpn' => $protocol]);
     }
 
+    #[NoDiscard]
     public function withSni(bool $enabled): self
     {
-        $c             = clone $this;
-        $c->sniEnabled = $enabled;
-
-        return $c;
+        return clone($this, ['sniEnabled' => $enabled]);
     }
 
     /**

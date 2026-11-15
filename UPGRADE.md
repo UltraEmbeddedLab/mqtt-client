@@ -1,5 +1,69 @@
 # Upgrade Guide
 
+## 2.0 → 2.1
+
+A minor release. No source change is required; everything below is either the new runtime
+requirement or a defect fix whose effect you can observe.
+
+### PHP 8.5 is required
+
+Raising the minimum PHP version is a minor change under the
+[compatibility promise](docs/backward-compatibility.md#php-version-support): on PHP 8.4,
+Composer simply keeps installing 2.0.x.
+
+### Discarding a `with*()` result now warns
+
+Every `with*()` on `Options`, `TlsOptions`, `SubscribeOptions` and `WillOptions` carries
+`#[\NoDiscard]`. They return a new instance and never modify the receiver, so this line has
+always done nothing:
+
+```php
+$options->withKeepAlive(30);            // Warning in 2.1 — it never had any effect
+$options = $options->withKeepAlive(30); // what was meant
+```
+
+If a test runner turns warnings into failures, such a line now fails a test. That is the
+intent: it was a bug before.
+
+### `ping()` processes whatever arrives before the PINGRESP
+
+It used to read two raw bytes and throw `ProtocolError` unless they were a PINGRESP — on a
+subscribed connection that ate the head of the next PUBLISH and desynchronised the stream.
+It now pumps the normal receive loop, so earlier packets are delivered as usual. It still
+returns `true` on PINGRESP and throws `Timeout` when none arrives in time; if the
+connection closes while it waits it throws `TransportError`.
+
+### `loopOnce()` may return `false` early to keep the connection alive
+
+When the requested timeout runs past the moment the next PINGREQ is due, the read now
+returns `false` at that moment so the next call can send it. Code that calls `loopOnce()`,
+`awaitMessage()`, `messages()` or `run()` in a loop is unaffected. The visible effect is a
+fix: `awaitMessage(null)` on a quiet connection used to block in the read without ever
+pinging — and on most systems the transport reported the socket's 5-second stream timeout
+as a fatal error and closed the connection.
+
+### Custom `TransportInterface` implementations
+
+`Client` now survives a `Timeout` in the middle of a packet and resumes on the next call,
+and it now calls `readExact()` with a timeout of `0.0` when Keep Alive housekeeping is due.
+Two properties of `readExact()` matter, both now written on `TransportInterface` and both
+kept by `TcpTransport`, `WsTransport` and `InMemoryTransport`:
+
+- **Consume nothing on `Timeout`.** Keep bytes already received for the next call. A
+  transport that discards them is no worse off than before, but it does not get the fix.
+- **Treat `0.0` as a poll.** Return data that is already waiting; do not check the deadline
+  before looking. A transport that fails a zero timeout outright cannot see a PINGRESP
+  sitting in its socket on those calls.
+
+### A failed `connect()` closes the transport
+
+If anything fails after the socket opens — TLS, no CONNACK in time, a malformed one — the
+transport is now closed before the exception propagates. `isOpen()` used to stay `true` in
+those cases, so auto-reconnect never retried and the next `loopOnce()` treated whatever
+arrived as traffic on a live session. The exception types are unchanged.
+
+---
+
 ## 1.x → 2.0
 
 Two things changed at once in 2.0: the package was renamed, and a set of defects were

@@ -3,7 +3,6 @@
 declare(strict_types=1);
 
 use Rector\Config\RectorConfig;
-use Rector\Php83\Rector\ClassMethod\AddOverrideAttributeToOverriddenMethodsRector;
 
 return RectorConfig::configure()
     ->withPaths([
@@ -14,9 +13,9 @@ return RectorConfig::configure()
     ->withRootFiles()
     ->withCache(__DIR__.'/.rector.cache')
     // withPhpSets()/withPreparedSets() replace the deprecated LevelSetList and SetList
-    // constants. Same rule coverage, but the target version is declarative — moving to
-    // PHP 8.5 later is a one-word change here.
-    ->withPhpSets(php84: true)
+    // constants. Same rule coverage, but the target version is declarative. Tracks the
+    // `php` constraint in composer.json — raise both together.
+    ->withPhpSets(php85: true)
     // strictBooleans was dropped: Rector deprecates it as "mostly risky and not practical"
     // and points at codeQuality, which already carries granular, stable equivalents.
     // Its other suggestion, codingStyle, is deliberately NOT enabled — it rewrites string
@@ -28,9 +27,4 @@ return RectorConfig::configure()
         typeDeclarations: true,
         privatization: true,
         earlyReturn: true,
-    )
-    ->withSkip([
-        // #[\Override] on interface implementations is noise in a library whose contracts
-        // are the point, and it churns every implementor on each interface edit.
-        AddOverrideAttributeToOverriddenMethodsRector::class,
-    ]);
+    );
