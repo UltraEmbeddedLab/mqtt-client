@@ -108,7 +108,23 @@ final class Client implements ClientInterface
     /** @var callable|null */
     private $messageHandler;
 
+    /**
+     * The connection ended and nothing will re-establish it — an inbound DISCONNECT, a ping
+     * timeout, a protocol violation, reconnect attempts exhausted — so run() and messages()
+     * stop instead of spinning on a closed transport. Belongs to that connection: connect()
+     * clears it.
+     */
     private bool $shouldStop = false;
+
+    /**
+     * The application called stop(). Kept apart from $shouldStop so that connect() — which
+     * clears what the previous connection left behind — never discards a stop the
+     * application asked for, e.g. from a SIGTERM handler between connections.
+     */
+    private bool $stopRequested = false;
+
+    /** Set while attemptReconnect() runs, so a wait inside it cannot reconnect again. */
+    private bool $reconnecting = false;
 
     /**
      * Acknowledgements for requests still being waited on, keyed by ackKey().
@@ -201,8 +217,24 @@ final class Client implements ClientInterface
 
     private readonly int $qos1SeenMax;
 
-    /** MQTT 5.0 Topic Alias Manager for bandwidth optimization */
+    /**
+     * Topic aliases this client may *send*, bounded by the broker's CONNACK Topic Alias
+     * Maximum. Null when the broker allows none.
+     */
     private ?TopicAliasManager $topicAliasManager = null;
+
+    /**
+     * Topic aliases the broker has established on this connection, alias => topic.
+     *
+     * Kept apart from $topicAliasManager on purpose. The two directions are independent
+     * alias namespaces with independent limits (MQTT-3.3.2.3.4): the broker may use aliases
+     * 1..Options::$topicAliasMaximum when talking to us, while we use 1..its CONNACK limit
+     * when talking to it. Sharing one map would let an alias the broker assigns overwrite
+     * one we assigned to a different topic.
+     *
+     * @var array<int, string>
+     */
+    private array $inboundTopicAliases = [];
 
     /** MQTT 5.0 Flow Control for QoS 1/2 in-flight message limiting */
     private ?FlowControl $flowControl = null;
@@ -449,17 +481,18 @@ final class Client implements ClientInterface
         ]);
         $this->metrics?->increment('ping_timeouts');
 
-        // Tell the application before tearing anything down. The inbound-DISCONNECT branch
-        // does the same; a connection dying silently is how a supervisor ends up watching a
-        // live process that will never deliver another message.
-        $willReconnect = $this->options->autoReconnect;
-        $this->events?->dispatch(new EvServerDisconnect(
-            new Disconnect(ReasonCode::KeepAliveTimeout->value),
-            $willReconnect,
-        ));
-
+        // Tell the application — a connection dying silently is how a supervisor ends up
+        // watching a live process that will never deliver another message. Closed first, as
+        // whenever the client is the side giving up, so listeners all see the same thing: a
+        // transport that is already closed.
         $this->transport->close();
         $this->resetConnectionState();
+
+        $willReconnect = $this->options->autoReconnect;
+        $this->events?->dispatch(new EvServerDisconnect(
+            new Disconnect(ReasonCode::KeepAliveTimeout->value, ['reason_string' => 'Closed by the client: no PINGRESP within the Ping Response Timeout']),
+            $willReconnect,
+        ));
 
         if (! $willReconnect) {
             // Nothing will re-establish this connection, so stop run()/messages() rather
@@ -489,7 +522,28 @@ final class Client implements ClientInterface
         $this->touchReceived();
     }
 
+    /**
+     * Connect, as the application asks to — which also clears the "connection ended" stop
+     * left behind by the previous connection.
+     *
+     * When a connection ends with auto-reconnect off (an inbound DISCONNECT, a ping timeout,
+     * a protocol violation), run() and messages() are told to stop. That belongs to the
+     * connection that died: left in place, the first run() after a manual reconnect returned
+     * at once, and a supervisor's catch → connect → run loop spun without ever processing a
+     * message. A stop() the application asked for is a separate flag and survives.
+     */
     public function connect(): ConnectResult
+    {
+        $this->shouldStop = false;
+
+        return $this->establishConnection();
+    }
+
+    /**
+     * Open the transport and complete the MQTT handshake. Shared by connect() and the
+     * auto-reconnect path, which must not clear a stop the application asked for.
+     */
+    private function establishConnection(): ConnectResult
     {
         $connectStart = Clock::now();
         // Nothing from a previous connection may leak into this one: Packet Identifiers,
@@ -535,25 +589,30 @@ final class Client implements ClientInterface
         }
 
         $assignedId = null;
-        if ($this->options->version === MqttVersion::V5_0 && is_array($connack->properties)) {
-            $assignedId = $connack->properties['assigned_client_identifier'] ?? null;
+        if ($this->options->version === MqttVersion::V5_0) {
+            $properties = is_array($connack->properties) ? $connack->properties : [];
+            $assignedId = $properties['assigned_client_identifier'] ?? null;
             if (! is_string($assignedId)) {
                 $assignedId = null;
             }
 
-            // Initialize Topic Alias Manager with broker's limit
-            $brokerTopicAliasMax = $connack->properties['topic_alias_maximum'] ?? 0;
-            if (is_int($brokerTopicAliasMax) && $brokerTopicAliasMax > 0) {
-                $this->topicAliasManager = new TopicAliasManager($brokerTopicAliasMax);
-                $this->logger->debug('Topic Alias Manager initialized', ['max' => $brokerTopicAliasMax]);
-            }
+            // Both limits are re-derived from every CONNACK, absent property included: they
+            // belong to this connection, and a broker that stops advertising one — a
+            // reconnect to another cluster node, a config change — must not inherit the
+            // previous connection's value.
 
-            // Initialize Flow Control with broker's receive_maximum
-            $brokerReceiveMax = $connack->properties['receive_maximum'] ?? 65535;
-            if (is_int($brokerReceiveMax) && $brokerReceiveMax > 0) {
-                $this->flowControl = new FlowControl($brokerReceiveMax);
-                $this->logger->debug('Flow Control initialized', ['max' => $brokerReceiveMax]);
-            }
+            // The broker's Topic Alias Maximum bounds the aliases this client may *send*.
+            // (The one in Options is the other direction; see $inboundTopicAliases.)
+            $brokerTopicAliasMax     = $properties['topic_alias_maximum'] ?? 0;
+            $this->topicAliasManager = is_int($brokerTopicAliasMax) && $brokerTopicAliasMax > 0
+                ? new TopicAliasManager($brokerTopicAliasMax)
+                : null;
+            $this->logger->debug('Outbound topic aliases', ['max' => $this->topicAliasManager->maxAliases ?? 0]);
+
+            // Receive Maximum defaults to 65,535 when the broker does not send it.
+            $brokerReceiveMax  = $properties['receive_maximum'] ?? 65535;
+            $this->flowControl = new FlowControl(is_int($brokerReceiveMax) && $brokerReceiveMax > 0 ? $brokerReceiveMax : 65535);
+            $this->logger->debug('Flow Control initialized', ['max' => $this->flowControl->maxInFlight]);
         }
 
         // Restore session state if session store is configured and session was present
@@ -719,9 +778,10 @@ final class Client implements ClientInterface
     {
         $this->topicAliasManager?->reset();
         $this->flowControl?->reset();
-        $this->qos1Seen    = [];
-        $this->pingSentAt  = null;
-        $this->silentPolls = 0;
+        $this->inboundTopicAliases = [];
+        $this->qos1Seen            = [];
+        $this->pingSentAt          = null;
+        $this->silentPolls         = 0;
         // A half-read frame belongs to the byte stream of the connection that just ended.
         $this->resetFrameState();
         // $acks is deliberately not touched. Each key belongs to a waiter still on the call
@@ -832,14 +892,25 @@ final class Client implements ClientInterface
                     if ($timeLeft <= 0) {
                         throw new Timeout('Flow control: timed out waiting for slot');
                     }
-                    $this->loopOnce(max(0.01, $timeLeft));
+                    if (! $this->loopOnce(max(0.01, $timeLeft)) && ! $this->transport->isOpen()) {
+                        // Nothing arrives on a closed transport until something reconnects
+                        // it; back off instead of spinning a core until the deadline.
+                        usleep(10_000);
+                    }
                 }
             }
         }
 
-        // Handle topic aliases for MQTT 5.0
+        // Topic aliases (MQTT 5) belong to the client and to this connection. A topic_alias in
+        // the caller's properties — typically copied from a received message to forward it —
+        // is dropped: passed through, it re-pointed an alias the client had assigned to a
+        // different topic, and the client's next publish to that topic went somewhere else.
+        $properties = $options->properties;
+        if ($properties !== null) {
+            unset($properties['topic_alias']);
+        }
         $publishTopic = $topic;
-        $publishProps = $options->properties;
+        $publishProps = $properties;
         if ($this->topicAliasManager instanceof TopicAliasManager && $this->options->version === MqttVersion::V5_0) {
             $aliasResult = $this->topicAliasManager->getOrCreateAlias($topic);
             if ($aliasResult['alias'] !== null) {
@@ -888,7 +959,7 @@ final class Client implements ClientInterface
         $this->metrics?->increment('publish_sent', 1.0, ['qos' => $qos]);
         $this->metrics?->size('publish_payload_bytes', strlen($payload), ['qos' => $qos]);
 
-        return $this->awaitPublishAck($qos, (int) $packetId, $publishTopic, $payload, $options, $publishProps);
+        return $this->awaitPublishAck($qos, (int) $packetId, $topic, $payload, $options, $properties);
     }
 
     /**
@@ -930,12 +1001,16 @@ final class Client implements ClientInterface
      * QoS 1 completes on PUBACK, QoS 2 on PUBCOMP; the PUBREC/PUBREL step in between is
      * answered by loopOnce() itself.
      *
-     * @param  array<string, mixed>|null  $publishProps
+     * A resend carries the full topic and no Topic Alias. If the connection was
+     * re-established while waiting, an alias would belong to the old connection — the new
+     * broker would reject it, or route it to whatever topic the alias now means.
+     *
+     * @param  array<string, mixed>|null  $properties  the caller's properties, alias removed
      * @return int The packet identifier, or 0 for QoS 0
      *
      * @throws Timeout if the acknowledgement never arrives within the resend budget
      */
-    private function awaitPublishAck(int $qos, int $packetId, string $publishTopic, string $payload, PublishOptions $options, ?array $publishProps): int
+    private function awaitPublishAck(int $qos, int $packetId, string $topic, string $payload, PublishOptions $options, ?array $properties): int
     {
         if ($qos === 0) {
             return 0;
@@ -954,20 +1029,20 @@ final class Client implements ClientInterface
                 $class,
                 $this->options->ackTimeout,
                 $what,
-                function () use (&$resends, $qos, $packetId, $publishTopic, $payload, $options, $publishProps): bool {
+                function () use (&$resends, $qos, $packetId, $topic, $payload, $options, $properties): bool {
                     if ($resends >= $this->options->maxResendAttempts) {
                         return false;
                     }
                     $resends++;
                     $this->logger->debug($qos === 1 ? '>> PUBLISH (resend)' : '>> PUBLISH (QoS2 resend)', ['packetId' => $packetId, 'attempt' => $resends]);
                     $this->trackWrite($this->encoder->encodePublish(new Publish(
-                        $publishTopic,
+                        $topic,
                         $payload,
                         $options->qos,
                         $options->retain,
                         dup: true,
                         packetId: $packetId,
-                        properties: $publishProps,
+                        properties: $properties,
                     )));
 
                     return true;
@@ -1220,7 +1295,14 @@ final class Client implements ClientInterface
 
         switch ($type) {
             case PacketType::PUBLISH->value:
-                $msg = $this->decoder->decodePublish($flags, $body);
+                // Before anything is acknowledged or delivered: an invalid alias ends the
+                // connection, and the message it carried must not be PUBACKed.
+                $msg = $this->resolveInboundTopic($this->decoder->decodePublish($flags, $body));
+                if (! $msg instanceof InboundMessage) {
+                    // The broker broke the alias rules and the connection is closed; with
+                    // auto-reconnect on, the next call re-establishes it.
+                    return false;
+                }
                 // QoS1: immediately acknowledge with PUBACK (v3/v5 minimal form)
                 if ($msg->qos->value === 1 && $msg->packetId !== null) {
                     $puback = chr(PacketType::PUBACK->value << 4) . chr(2) . pack('n', $msg->packetId);
@@ -1382,7 +1464,7 @@ final class Client implements ClientInterface
 
     public function stop(): void
     {
-        $this->shouldStop = true;
+        $this->stopRequested = true;
     }
 
     public function awaitMessage(?float $timeoutSec = null): ?InboundMessage
@@ -1440,7 +1522,7 @@ final class Client implements ClientInterface
     {
         $this->onMessage($onMessage);
         for (; ;) {
-            if ($this->shouldStop) {
+            if ($this->shouldStop || $this->stopRequested) {
                 break;
             }
             $processed = $this->loopOnce(0.2);
@@ -1461,7 +1543,7 @@ final class Client implements ClientInterface
     public function messages(?float $timeoutSec = 0.2): Generator
     {
         for (; ;) {
-            if ($this->shouldStop) {
+            if ($this->shouldStop || $this->stopRequested) {
                 break;
             }
             $msg = $this->awaitMessage($timeoutSec);
@@ -1508,6 +1590,14 @@ final class Client implements ClientInterface
         if (! $this->options->autoReconnect) {
             return false;
         }
+        if ($this->reconnecting) {
+            // A wait inside the reconnect itself — the resubscribe, the offline-queue drain —
+            // found the new connection closed again. Reconnecting from in here nested one
+            // level per failure: a broker that broke the rules right after every CONNACK grew
+            // the stack without bound, and loopOnce() never returned. The wait times out
+            // instead, this attempt counts as failed, and the outermost loop tries again.
+            return false;
+        }
         if ($this->reconnectAttempts >= $this->options->reconnectMaxAttempts) {
             $this->logger->warning('Auto-reconnect: max attempts reached; stopping');
             $this->shouldStop = true;
@@ -1520,20 +1610,28 @@ final class Client implements ClientInterface
             usleep((int) floor($delay * 1_000_000));
         }
 
+        $this->reconnecting = true;
+
         try {
             $this->logger->info('Attempting reconnect', ['attempt' => $this->reconnectAttempts + 1]);
             $this->metrics?->increment('reconnect_attempts');
-            $this->connect();
+            $this->establishConnection();
             $this->reconnectAttempts = 0;
             // Resubscribe
             if ($this->subscriptions !== []) {
                 $this->isResubscribing = true;
-                foreach ($this->subscriptions as $topic => $s) {
-                    $this->subscribeWith([
-                        ['filter' => $topic, 'qos' => $s['qos']],
-                    ], $s['options']);
+                try {
+                    foreach ($this->subscriptions as $topic => $s) {
+                        $this->subscribeWith([
+                            ['filter' => $topic, 'qos' => $s['qos']],
+                        ], $s['options']);
+                    }
+                } finally {
+                    // However the resubscribe ends. Left set, every later subscribe() — even
+                    // after a manual connect() — would go unrecorded and not survive the
+                    // next reconnect.
+                    $this->isResubscribing = false;
                 }
-                $this->isResubscribing = false;
             }
 
             return true;
@@ -1542,6 +1640,8 @@ final class Client implements ClientInterface
             $this->logger->warning('Reconnect failed', ['error' => $e->getMessage(), 'attempts' => $this->reconnectAttempts]);
 
             return false;
+        } finally {
+            $this->reconnecting = false;
         }
     }
 
@@ -1573,6 +1673,120 @@ final class Client implements ClientInterface
         $hex = strtoupper(bin2hex($s));
 
         return trim(chunk_split($hex, 2, ' ')) . (strlen($bytes) > 64 ? ' …' : '');
+    }
+
+    /**
+     * Give an inbound PUBLISH its real topic, applying the broker's Topic Alias (MQTT 5).
+     *
+     * A PUBLISH carrying both a topic and an alias establishes — or replaces — the mapping;
+     * one carrying only an alias uses it. Without this, every aliased PUBLISH after the
+     * first reached the application with an empty topic.
+     *
+     * The alias itself is removed from the delivered message's properties. It is a detail of
+     * this connection in the broker-to-client direction, meaningless to the application —
+     * and harmful when a message is forwarded with its properties, since the number would
+     * then be sent back in the other direction.
+     *
+     * Returns null when the broker broke the rules and auto-reconnect will take over; see
+     * abortConnection().
+     *
+     * @throws ProtocolError for an alias the broker may not use, one it never established,
+     *                       or an empty topic with no alias, when nothing will reconnect
+     */
+    private function resolveInboundTopic(InboundMessage $msg): ?InboundMessage
+    {
+        $alias = $msg->properties['topic_alias'] ?? null;
+
+        if (! is_int($alias)) {
+            if ($msg->topic === '') {
+                // §3.3.2.1: an empty Topic Name is only valid together with a Topic Alias.
+                return $this->abortConnection(ReasonCode::ProtocolError, 'Inbound PUBLISH has an empty topic and no Topic Alias');
+            }
+
+            return $msg;
+        }
+
+        // MQTT-3.3.2-8 and -11: 0 is never a valid alias, and the broker may not exceed the
+        // Topic Alias Maximum this client sent in CONNECT — where 0 means none at all.
+        $maximum = $this->options->topicAliasMaximum;
+        if ($alias < 1 || $alias > $maximum) {
+            return $this->abortConnection(ReasonCode::TopicAliasInvalid, "Inbound Topic Alias $alias is outside the permitted range 1..$maximum");
+        }
+
+        $topic = $msg->topic;
+        if ($topic !== '') {
+            $this->inboundTopicAliases[$alias] = $topic;
+        } else {
+            $topic = $this->inboundTopicAliases[$alias] ?? '';
+            if ($topic === '') {
+                return $this->abortConnection(ReasonCode::ProtocolError, "Inbound Topic Alias $alias was never established on this connection");
+            }
+        }
+
+        $properties = $msg->properties ?? [];
+        unset($properties['topic_alias']);
+
+        return new InboundMessage(
+            topic: $topic,
+            payload: $msg->payload,
+            qos: $msg->qos,
+            retain: $msg->retain,
+            dup: $msg->dup,
+            packetId: $msg->packetId,
+            properties: $properties,
+        );
+    }
+
+    /**
+     * End the connection because the broker broke the protocol.
+     *
+     * Per §4.13 the receiver of a Protocol Error closes the Network Connection; MQTT 5 lets
+     * it say why with a DISCONNECT reason code first, MQTT 3.1.1 has no way to. Listeners get
+     * a ServerDisconnect event, as for a ping timeout, so the connection never dies silently
+     * — not even when the violation surfaces inside a message handler's own publish(). Its
+     * reason string says the client closed the connection, not the broker.
+     *
+     * The transport is closed before the event is dispatched, so a listener that publishes
+     * cannot put a packet on the wire after the client's own DISCONNECT. Connection state is
+     * not reset here: the next connect does that, and resetting now freed flow-control slots
+     * under a publish() still waiting for one, which then wrote to the closed transport.
+     *
+     * With auto-reconnect on this returns null and loopOnce() reports "nothing processed",
+     * so the next call reconnects and a pending publish() resends. With it off, nothing would
+     * re-establish the connection, so the violation is thrown.
+     *
+     * @throws ProtocolError when auto-reconnect is off
+     */
+    private function abortConnection(ReasonCode $reason, string $message): null
+    {
+        $this->logger->warning('Closing the connection: the broker violated the protocol', ['reason' => $reason->name, 'detail' => $message]);
+        if ($this->options->version === MqttVersion::V5_0 && $this->transport->isOpen()) {
+            try {
+                // DISCONNECT, Remaining Length 1, the reason code; no properties.
+                $this->trackWrite(pack('CCC', PacketType::DISCONNECT->value << 4, 1, $reason->value));
+            } catch (MqttException) {
+                // Best effort: the connection is being torn down either way.
+            }
+        }
+        $this->transport->close();
+        $this->resetFrameState();
+
+        $willReconnect = $this->options->autoReconnect;
+        $this->events?->dispatch(new EvServerDisconnect(
+            new Disconnect($reason->value, ['reason_string' => "Closed by the client: $message"]),
+            $willReconnect,
+        ));
+        $this->metrics?->increment('protocol_violations', 1.0, ['reason' => $reason->value]);
+
+        if ($willReconnect) {
+            return null;
+        }
+
+        // As for an inbound DISCONNECT: nothing will re-establish this connection, so
+        // run()/messages() stop instead of spinning on a closed transport.
+        $this->shouldStop = true;
+
+        throw new ProtocolError($message, $reason->value);
     }
 
     private function deliverIfMatches(InboundMessage $msg): void
@@ -1741,14 +1955,30 @@ final class Client implements ClientInterface
         }
 
         $drained = 0;
-        while (($msg = $this->offlineQueue->dequeue()) !== null) {
+        // Only while the connection holds: publish() on a closed transport puts the message
+        // straight back into this queue, so draining on past a disconnect could only cycle
+        // messages through it.
+        while ($this->transport->isOpen() && ($msg = $this->offlineQueue->dequeue()) !== null) {
+            $sentBefore = $this->bytesSent;
             try {
                 $this->publish($msg['topic'], $msg['payload'], $msg['options']);
                 $drained++;
             } catch (Throwable $e) {
-                $this->logger->warning('Failed to drain offline message', ['topic' => $msg['topic'], 'error' => $e->getMessage()]);
+                if (($e instanceof TransportError || $e instanceof Timeout) && $this->bytesSent === $sentBefore) {
+                    // Not a byte reached the wire, for a passing reason — the connection was
+                    // gone, or no flow-control slot freed up in time — so it is safe to retry
+                    // on the next connection, at the head of the queue.
+                    $this->offlineQueue->requeue($msg);
+                    $this->logger->warning('Offline message kept for the next connection', ['topic' => $msg['topic'], 'error' => $e->getMessage()]);
 
-                break;
+                    break;
+                }
+
+                // Either it reached the broker — retrying could deliver a QoS 2 message twice —
+                // or it can never be sent, such as one that cannot be encoded, and retrying it
+                // would block every message behind it for good. Dropped, as it always was.
+                $this->logger->warning('Offline message dropped', ['topic' => $msg['topic'], 'error' => $e->getMessage()]);
+                $this->metrics?->increment('offline_queue_dropped');
             }
         }
 

@@ -30,10 +30,13 @@ use function count;
  * // Second publish - reuses alias
  * $alias = $manager->getOrCreateAlias('sensors/temperature'); // returns 1
  * // Publish with topic='', alias=1 (topic can be omitted)
- *
- * // Resolve incoming alias
- * $topic = $manager->resolveAlias(1); // returns 'sensors/temperature'
  * ```
+ *
+ * One instance holds one direction. `Client` uses it for the aliases it *sends*, and keeps
+ * the aliases the broker sends in a separate map: the two directions are independent alias
+ * namespaces with independent limits (MQTT-3.3.2.3.4), so one manager must never serve
+ * both. `resolveAlias()` and `registerAlias()` look up and record mappings within the
+ * single direction an instance manages.
  */
 final class TopicAliasManager
 {

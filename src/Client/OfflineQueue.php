@@ -62,6 +62,20 @@ final class OfflineQueue
         return $this->queue->dequeue();
     }
 
+    /**
+     * Put a message back at the head of the queue.
+     *
+     * For a message just dequeued that could not be sent: it keeps its place in line and is
+     * not lost. The bound is not checked — the slot was the message's own a moment ago.
+     *
+     * @param  array{topic: string, payload: string, options: PublishOptions}  $message
+     */
+    public function requeue(array $message): void
+    {
+        $this->queue->unshift($message);
+        $this->count++;
+    }
+
     public function isEmpty(): bool
     {
         return $this->queue->isEmpty();

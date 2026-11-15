@@ -7,7 +7,14 @@ namespace ScienceStories\Mqtt\Events;
 use ScienceStories\Mqtt\Protocol\Packet\Disconnect;
 
 /**
- * PSR-14 event dispatched when the broker sends a DISCONNECT packet.
+ * PSR-14 event dispatched when the connection to the broker ends unexpectedly.
+ *
+ * Usually because the broker sent a DISCONNECT. It is also dispatched when the client ends
+ * the connection itself — a PINGRESP that never came (0x8D), or a broker that broke the
+ * protocol, such as an invalid topic alias (0x94, 0x82). Then `$disconnect` is a packet the
+ * client built, and its `reason_string` property begins "Closed by the client", so a
+ * listener can tell which side gave up. In that case the transport is already closed when
+ * listeners run: anything they publish goes to the offline queue, if one is configured.
  *
  * MQTT 5.0 allows brokers to send DISCONNECT packets to clients with:
  * - Reason codes explaining why the connection is being closed

@@ -2,6 +2,18 @@
 
 In MQTT 5.0, the broker can send a DISCONNECT packet to the client with a reason code explaining why the connection is being closed.
 
+The `ServerDisconnect` event also fires when the **client** ends the connection — a PINGRESP
+that never arrived (`0x8D`), or a broker that broke the protocol, such as an invalid topic
+alias (`0x94`, `0x82`). The event's `Disconnect` is then one the client built, and its
+`reason_string` property begins `Closed by the client`:
+
+```php
+$reason       = $event->disconnect->properties['reason_string'] ?? '';
+$closedByUs   = str_starts_with($reason, 'Closed by the client');
+```
+
+When the client closed the connection, the transport is already closed while listeners run.
+
 ## Overview
 
 MQTT 3.1.1 only allowed clients to send DISCONNECT. MQTT 5.0 enables:
@@ -173,12 +185,16 @@ if ($disconnect->reasonCode === 0x97) {
 
 ### Keep Alive Timeout (0x8D)
 
-Client failed to send PING in time:
+Sent by the broker, it means the client went quiet for longer than 1.5× Keep Alive — the
+client pings on its own, so this points at a process that blocked (a long handler, a GC
+pause) or a network that dropped packets. Built by the client (`reason_string` starts with
+`Closed by the client`), it means the broker did not answer a PINGREQ within
+`Options::$pingResponseTimeout`: the link is dead, not slow.
 
 ```php
 if ($disconnect->reasonCode === 0x8D) {
-    // Increase keep alive interval
-    // Ensure network stability
+    // Broker side: keep loopOnce() running often enough, or raise Keep Alive.
+    // Client side: the network path is gone; auto-reconnect handles it.
 }
 ```
 

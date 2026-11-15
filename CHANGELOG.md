@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A broker that sends a topic alias the client never allowed now has the connection closed.** At the default `topicAliasMaximum` of 0 the client tells the broker it accepts no aliases, so any alias it receives breaks MQTT-3.3.2-11 — previously such a PUBLISH was still delivered when it also carried its topic. A conforming broker never does this; the change is listed because the observable result differs. See the topic-alias entries under Fixed for what happens on closing.
+- **`Events\ServerDisconnect` is also dispatched when the client ends the connection** — a missing PINGRESP (`0x8D`) or a broker protocol violation (`0x94`, `0x82`). The packet is then one the client built, and its `reason_string` property begins "Closed by the client", so listeners can tell which side gave up. In those cases the transport is already closed when listeners run, so a listener's publish can no longer follow the client's own DISCONNECT (MQTT-3.14.4-1).
+
+### Fixed — topic aliases
+
+- **Inbound MQTT 5 topic aliases are resolved.** The client could invite the broker to use aliases (`withTopicAliasMaximum()`) but never resolved them, so every aliased PUBLISH after the first reached the application with an empty topic. The broker's aliases now live in their own map, apart from the client's outbound ones — the two directions are independent alias namespaces with independent limits (MQTT-3.3.2.3.4), and sharing a map would let an alias the broker assigns overwrite one the client assigned to a different topic. Mappings are cleared on every reconnect.
+- **The broker's alias no longer reaches the application.** `topic_alias` is removed from a delivered message's properties: it means something only on this connection, in the broker-to-client direction. Left in place, forwarding a message with its properties — the usual way to keep user properties and content type — sent the number back the other way, re-pointed one of the client's own aliases, and the client's next publish to that topic was routed to the forwarded one.
+- **A `topic_alias` set by the caller is dropped.** Aliases belong to the client; a hand-set value was passed through whenever the client's alias map was full or the broker allowed none.
+- **A QoS 1/2 resend carries the full topic and no alias.** It reused the first send's empty topic and alias, so a reconnect while waiting for the acknowledgement resent with an alias the new connection had never set up — rejected by the broker, or routed to whatever the alias meant there.
+- **Outbound aliasing no longer outlives the connection that set it up.** The alias manager was created only when CONNACK advertised a Topic Alias Maximum, so a reconnect to a broker that stopped advertising one kept the old limit and sent aliases the new broker had not allowed. It is now re-derived from every CONNACK.
+- **A broker that breaks the alias rules has the connection closed**, as MQTT 5 requires of the receiver: an alias of 0 or above the limit the client sent gets DISCONNECT `0x94` (Topic Alias Invalid); an alias never established, or an empty topic with no alias, gets `0x82` (Protocol Error). The message is not acknowledged and `Events\ServerDisconnect` is dispatched. With auto-reconnect on, `loopOnce()` returns `false` and the next call reconnects; with it off, `ProtocolError` is thrown. On MQTT 3.1.1 an empty topic is the only case: no DISCONNECT reason can be sent, the connection is closed, and the same event and exception follow.
+- The documentation described `withTopicAliasMaximum()` as a budget the broker could lower. It is the limit on aliases the *broker* may use; outbound aliasing has always followed the broker's CONNACK limit. README, `docs/topic-aliases.md`, the docblocks and the example now say so.
+
+### Fixed — after a connection ends
+
+- **`connect()` clears the stop left behind by the previous connection, and nothing else.** When a connection ended with auto-reconnect off — an inbound DISCONNECT, a ping timeout, a protocol violation — `run()` and `messages()` were told to stop, and that outlived the connection: the first `run()` after a manual reconnect returned at once, and a supervisor's catch → connect → run loop spun without processing a message. A `stop()` the application asked for is now a separate flag that `connect()` leaves alone, so a SIGTERM handler that calls `stop()` between connections still ends the next loop.
+- **Auto-reconnect no longer nests.** A wait inside a reconnect — the resubscribe, the offline-queue drain — that found the fresh connection closed again reconnected one level deeper, so a broker that broke the rules right after every CONNACK, or disconnected straight away, grew the stack without bound and a single `loopOnce()` never returned. A reconnect cannot start inside another; the inner wait times out, the attempt counts as failed, and the outermost loop tries again.
+- **A message that could not be written while draining the offline queue is kept** at the head of the queue for the next connection — when nothing reached the wire for a passing reason (the connection was gone, or no flow-control slot freed up). A message that reached the broker, or can never be sent, such as one that cannot be encoded, is dropped with a warning and the `offline_queue_dropped` metric, as before: retrying the first could deliver a QoS 2 message twice, and retrying the second would block every message behind it. Draining stops as soon as the connection is gone.
+- **A publish waiting for a flow-control slot survives a protocol violation.** Closing the connection reset connection state, freeing the slot under the waiting `publish()`, which then wrote to the closed transport and lost the message even with auto-reconnect on. The state is left for the next connect to reset; the waiting publish goes out on the reconnected connection. The wait also backs off instead of spinning while the transport is closed.
+- **A failed resubscribe after auto-reconnect no longer leaves later subscriptions unrecorded.** The internal "resubscribing" flag stayed set, so every `subscribe()` afterwards — even after a manual `connect()` — was not remembered for the next reconnect.
+
+### Added
+
+- `OfflineQueue::requeue()` puts a message back at the head of the queue.
+
 ## [2.1.0] - 2026-11-15
 
 PHP 8.5, and a client that can hold a connection open: a timeout at any byte of a packet no

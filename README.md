@@ -21,7 +21,7 @@ Modern, production-grade MQTT 3.1.1 & 5.0 client for PHP 8.5+
 - **Session persistence** — subscriptions survive a restart (`FileSessionStore`, or your own `SessionStoreInterface`)
 - **Offline message queue** with automatic drain on reconnect
 - **Rate limiter** (token bucket) to keep from flooding a broker
-- **MQTT 5 flow control, shared subscriptions and outbound topic aliases**
+- **MQTT 5 flow control, shared subscriptions and topic aliases** in both directions
 - **Unit-testable without a broker** — `Testing\InMemoryTransport` scripts the broker's side, see [Testing](docs/testing.md)
 - **PSR-3** logging, **PSR-14** events, byte counters (`bytesSent()` / `bytesReceived()`)
 - **Modern PHP 8.5** with strict types and PHPStan at level max; the immutable options carry
@@ -183,7 +183,7 @@ $client->disconnect();
 | `offlineQueueSize`  | int         | 0         | Publishes buffered while disconnected, drained on reconnect (0 = off) |
 | `rateLimiter`       | ?RateLimiter | null     | Token-bucket throttle for outbound publishes            |
 | `sessionStore`      | ?SessionStoreInterface | null | Persist subscriptions across restarts (use with `cleanSession: false`) |
-| `topicAliasMaximum` | int         | 0         | MQTT 5 topic aliases to request (0 = disabled)          |
+| `topicAliasMaximum` | int         | 0         | MQTT 5 topic aliases the broker may use when sending to this client (0 = none). Outbound aliases follow the broker's limit. |
 | `receiveMaximum`    | int         | 65535     | MQTT 5 flow-control window                              |
 | `ackTimeout`         | float       | 5.0       | Timeout (seconds) waiting for QoS 1/2 ACK before resend                         |
 | `maxResendAttempts`  | int         | 3         | Max resend attempts for unacknowledged QoS 1/2 messages                        |
@@ -280,28 +280,34 @@ $options = $options->withTls($tls);
 
 ### Topic Aliases
 
-Topic aliases replace a repeated topic string with a two-byte integer. They are managed
-automatically — request a budget on `Options`, then publish normally:
+Topic aliases replace a repeated topic string with a two-byte integer. Each direction has
+its own aliases and its own limit, and both are handled for you:
 
 ```php
 $options = (new Options('broker.example.com', 1883, version: MqttVersion::V5_0))
+    // Let the broker use up to 10 aliases when it sends to us. Aliased messages still
+    // reach your handler with their full topic.
     ->withTopicAliasMaximum(10);
 
 $client = new Client($options, new TcpTransport());
 $client->connect();
 
-// First publish sends the topic and establishes the alias.
+// Outbound aliasing needs no setting: it follows the limit the broker sends in CONNACK.
+// The first publish sends the topic and establishes the alias...
 $client->publish('factory/line-3/press/temperature', '218.4');
-// Later publishes to the same topic send two bytes instead of thirty-four.
+// ...later ones to the same topic send two bytes instead of thirty-four.
 $client->publish('factory/line-3/press/temperature', '218.9');
 ```
 
-The broker's `topic_alias_maximum` in CONNACK overrides your request; if it advertises 0,
-aliasing is disabled and publishes fall back to full topic strings.
+If the broker advertises a Topic Alias Maximum of 0, publishes use full topic strings. A
+broker that sends an alias above the limit you set, or one it never established, has the
+connection closed, as MQTT 5 requires, and a `ServerDisconnect` event dispatched. With
+auto-reconnect on the client then reconnects; with it off, `loopOnce()` throws
+`ProtocolError`.
 
-> Do not set the `topic_alias` property by hand on `PublishOptions`. Aliases are
-> connection-scoped and negotiated — a hand-set value is either overwritten by the client
-> or rejected by the broker with reason code 0x94 (Topic Alias Invalid).
+> Do not set the `topic_alias` property on `PublishOptions`. Aliases belong to the client
+> and to the connection, so the client drops a hand-set one — including when you forward a
+> received message's properties, which never contain the broker's alias.
 
 ### Message Expiry
 
@@ -388,8 +394,6 @@ Stated up front rather than discovered in production:
 - **`wss://` does not work.** `WsTransport` performs the HTTP upgrade before TLS can be
   enabled, so only `ws://` completes a handshake. `ws://` itself — masking, fragmented
   messages, ping/pong — is unit-tested and verified against Mosquitto 2.0.
-- **Inbound MQTT 5 topic aliases are not resolved.** If a broker sends aliased PUBLISH
-  packets, the topic arrives empty. Leave `withTopicAliasMaximum()` at 0 (the default).
 - **Acknowledgement reason codes are not acted on.** A PUBACK or SUBACK carrying a failure
   code is logged, not raised — a rejected subscription looks successful. `subscribeWith()`
   returns the codes in its `SubscribeResult`; `subscribe()` does not.

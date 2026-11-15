@@ -19,11 +19,13 @@ require __DIR__.'/../vendor/autoload.php';
  * Topic aliases allow replacing a topic string with a 2-byte integer,
  * significantly reducing bandwidth for repeated publishes to the same topic.
  *
- * How it works:
- * 1. Client requests topic_alias_maximum in CONNECT
- * 2. Broker advertises its topic_alias_maximum in CONNACK
- * 3. First publish with topic + alias establishes the mapping
- * 4. Subsequent publishes use alias only (topic can be empty)
+ * How it works — each direction has its own aliases and its own limit:
+ * 1. The client tells the broker, in CONNECT, how many aliases it may use towards the client
+ *    (withTopicAliasMaximum()); the client resolves those for you on receipt.
+ * 2. The broker tells the client, in CONNACK, how many aliases the client may use when
+ *    publishing; this example shows that direction.
+ * 3. The first publish to a topic sends topic + alias, establishing the mapping.
+ * 4. Later publishes to it send only the alias (an empty topic).
  *
  * Benefits:
  * - Reduced bandwidth for repeated publishes to same topic
@@ -56,7 +58,7 @@ $options = new Options(
     ->withClientId($clientId)
     ->withKeepAlive(60)
     ->withCleanSession(true)
-    ->withTopicAliasMaximum(10); // Request up to 10 topic aliases
+    ->withTopicAliasMaximum(10); // Aliases the broker may use when sending to us
 
 if (($config['username'] ?? null) !== null) {
     $options = $options->withUser($config['username'], $config['password'] ?? null);
@@ -79,7 +81,7 @@ echo "Topic Alias Example (MQTT 5.0)\n";
 echo "   Host: {$config['host']}\n";
 echo "   Port: $options->port\n";
 echo "   Client ID: $clientId\n";
-echo "   Requested Topic Alias Max: $options->topicAliasMaximum\n\n";
+echo "   Inbound Topic Alias Max (ours): $options->topicAliasMaximum\n\n";
 
 try {
     $result = $client->connect();

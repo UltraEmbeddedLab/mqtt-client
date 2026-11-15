@@ -26,9 +26,8 @@ See the [2.1.0 changelog](CHANGELOG.md).
 
 Defects a first user would hit. All fixable without changing a signature.
 
-- **Resolve inbound topic aliases.** The client can invite the broker to use aliases but
-  never resolves them, so every aliased PUBLISH arrives with an empty topic. Until this
-  lands, leave `withTopicAliasMaximum()` at 0.
+- ~~**Resolve inbound topic aliases.**~~ Done — in their own map, apart from outbound
+  aliases, with the receiver's protocol checks (see `[Unreleased]` in the changelog).
 - **Stop re-subscribing to filters the broker refused**, and record the granted QoS rather
   than the requested one. `subscribeWith()` already returns the SUBACK codes; `subscribe()`
   discards them, so a refused filter is retried on every reconnect.

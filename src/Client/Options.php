@@ -59,7 +59,8 @@ final class Options
         public float $reconnectMaxDelay = 5.0,  // seconds
         public float $reconnectJitter = 0.2,    // +/- 20%
         public array $messageFilters = [],
-        // MQTT 5.0 Topic Alias Maximum (0 = disabled, max 65535)
+        // MQTT 5.0 Topic Alias Maximum: aliases the broker may use towards this client
+        // (0 = none, max 65535). Outbound aliases follow the broker's CONNACK limit instead.
         public int $topicAliasMaximum = 0,
         // MQTT 5.0 Receive Maximum for flow control (1-65535, default 65535)
         public int $receiveMaximum = 65535,
@@ -267,12 +268,18 @@ final class Options
     }
 
     /**
-     * MQTT 5.0 Topic Alias Maximum.
+     * MQTT 5.0 Topic Alias Maximum: how many topic aliases the broker may use when it sends
+     * messages to this client.
      *
-     * Sets the maximum number of topic aliases the client wants to use.
-     * The broker may advertise a lower limit in CONNACK which takes precedence.
+     * Sent in CONNECT. It does not govern the aliases this client sends — those are bounded
+     * by the broker's own Topic Alias Maximum in CONNACK and applied automatically. The two
+     * directions are independent (MQTT-3.3.2.3.4).
      *
-     * @param int $maximum Maximum topic aliases (0 = disabled, max 65535)
+     * A broker that exceeds this limit, or uses an alias it never established, has the
+     * connection closed: with auto-reconnect the client reconnects, without it loopOnce()
+     * throws ProtocolError. At the default of 0, any alias the broker sends does this.
+     *
+     * @param int $maximum Inbound aliases accepted (0 = the broker may not use any, max 65535)
      */
     #[NoDiscard]
     public function withTopicAliasMaximum(int $maximum): self
