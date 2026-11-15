@@ -51,6 +51,11 @@ When publishing at maximum capacity:
 Flow control tracks:
 - **PUBACK**: QoS 1 acknowledgment → releases slot
 - **PUBCOMP**: QoS 2 final acknowledgment → releases slot
+- **PUBREC with a reason code of 0x80 or above**: the broker refused a QoS 2 message, so the
+  exchange ends there (no PUBREL is sent) → releases slot
+
+A failure code on PUBACK or PUBCOMP releases the slot too: what counts is that the broker
+answered (MQTT 5 §4.9).
 
 ## API Reference
 

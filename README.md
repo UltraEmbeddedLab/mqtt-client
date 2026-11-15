@@ -17,7 +17,7 @@ Modern, production-grade MQTT 3.1.1 & 5.0 client for PHP 8.5+
 - **TLS 1.2+ & mutual TLS (mTLS)** — TLS 1.0/1.1 refused by default (RFC 8996); typed `TlsOptions` for client certificates, CA verification and ALPN
 - **WebSocket transport** (`ws://`) with RFC 6455 framing — `wss://` is not functional yet, see [Known Limitations](#known-limitations)
 - **Auto-reconnect** with exponential backoff and jitter, re-subscribing on its own
-- **QoS 1 and 2 resend** with the DUP flag on acknowledgement timeout
+- **QoS 1 and 2 retransmission** on acknowledgement timeout — the PUBLISH with DUP, or only the PUBREL once a QoS 2 message has been received (MQTT-4.3.3)
 - **Session persistence** — subscriptions survive a restart (`FileSessionStore`, or your own `SessionStoreInterface`)
 - **Offline message queue** with automatic drain on reconnect
 - **Rate limiter** (token bucket) to keep from flooding a broker
@@ -397,10 +397,9 @@ Stated up front rather than discovered in production:
 - **A refused subscription is reported, not raised.** The client stops resubscribing to a
   filter the broker refused and dispatches `Events\SubscriptionRefused`; `subscribeWith()`
   also returns the codes. But `subscribe()` returns normally either way — making it throw
-  changes its contract and is planned for 3.0. PUBACK and PUBCOMP failure codes are still
-  only logged: a publish the broker rejected returns its packet identifier as if delivered.
-- **QoS 2 retransmission is not yet conforming.** Once PUBREC has arrived only PUBREL may
-  be sent again, but if PUBCOMP is late the client resends the PUBLISH (with DUP) instead.
+  changes its contract and is planned for 3.0. Likewise a message the broker refuses in its
+  PUBACK or PUBREC is logged as a warning and counted on the `publish_failed` metric, but
+  `publish()` still returns the packet identifier as if the message had been delivered.
 - **Broker-advertised limits are not enforced.** Maximum QoS, Retain Available and Maximum
   Packet Size from CONNACK are decoded but not checked before publishing.
 - **Session persistence covers subscriptions only.** In-flight QoS 1/2 messages are not

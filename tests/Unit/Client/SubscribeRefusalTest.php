@@ -11,7 +11,7 @@ use ScienceStories\Mqtt\Protocol\MqttVersion;
 use ScienceStories\Mqtt\Protocol\Packet\PacketType;
 use ScienceStories\Mqtt\Session\SessionState;
 use ScienceStories\Mqtt\Testing\InMemoryTransport;
-use ScienceStories\Mqtt\Tests\Support\FailingWrites;
+use ScienceStories\Mqtt\Tests\Support\InterceptingTransport;
 use ScienceStories\Mqtt\Util\Bytes;
 use ScienceStories\Mqtt\Util\RandomId;
 
@@ -253,7 +253,7 @@ describe('a resubscribe that fails part-way', function (): void {
         // unsubscribed on a live connection.
         RandomId::resetPacketId();
         $inner     = new InMemoryTransport();
-        $transport = new FailingWrites($inner);
+        $transport = new InterceptingTransport($inner);
         $inner->feedConnAck();
         $client = new Client(
             new Options(host: 'fake.broker', clientId: 'resub')->withAutoReconnect(maxAttempts: 3, baseDelay: 0.0, jitter: 0.0),

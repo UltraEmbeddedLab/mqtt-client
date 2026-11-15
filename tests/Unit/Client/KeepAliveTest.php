@@ -267,8 +267,9 @@ describe('flow control does not leak slots', function (): void {
 
         // But it must not be held forever, or a handful of timeouts against a broker
         // granting receive_maximum 1 would exhaust the quota for the life of the process.
-        // Past the full resend budget the sweep reclaims it.
-        $grace = max(1.0, 0.1 * 2);
+        // Well past the longest a publish() can wait — a QoS 2 exchange, doubled — the sweep
+        // reclaims it.
+        $grace = max(1.0, 0.1 * 2 * 2);                 // ackTimeout × (0 resends + 2 steps), doubled
         writePrivate($flow, 'pending', [readPrivate($flow, 'pending') === [] ? 1 : array_key_first(readPrivate($flow, 'pending')) => hrtime(true) / 1e9 - $grace - 1.0]);
 
         $client->loopOnce(0.0);

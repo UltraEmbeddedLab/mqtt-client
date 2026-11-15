@@ -15,7 +15,7 @@ use ScienceStories\Mqtt\Protocol\MqttVersion;
 use ScienceStories\Mqtt\Protocol\Packet\PacketType;
 use ScienceStories\Mqtt\Protocol\QoS;
 use ScienceStories\Mqtt\Testing\InMemoryTransport;
-use ScienceStories\Mqtt\Tests\Support\FailingWrites;
+use ScienceStories\Mqtt\Tests\Support\InterceptingTransport;
 use ScienceStories\Mqtt\Util\Bytes;
 use ScienceStories\Mqtt\Util\RandomId;
 
@@ -72,7 +72,7 @@ describe('draining the offline queue', function (): void {
 
     it('keeps a message that never reached the wire, at the head, for the next connection', function (): void {
         $inner     = new InMemoryTransport();
-        $transport = new FailingWrites($inner);
+        $transport = new InterceptingTransport($inner);
         $client    = new Client(new Options(host: 'fake.broker', clientId: 'drain')->withOfflineQueue(10), $transport);
         $client->publish('first', '1');
         $client->publish('second', '2');

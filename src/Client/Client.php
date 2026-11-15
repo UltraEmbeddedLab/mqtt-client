@@ -35,6 +35,7 @@ use ScienceStories\Mqtt\Protocol\Packet\PacketType;
 use ScienceStories\Mqtt\Protocol\Packet\PubAck;
 use ScienceStories\Mqtt\Protocol\Packet\PubComp;
 use ScienceStories\Mqtt\Protocol\Packet\Publish;
+use ScienceStories\Mqtt\Protocol\Packet\PubRec;
 use ScienceStories\Mqtt\Protocol\Packet\SubAck;
 use ScienceStories\Mqtt\Protocol\Packet\UnsubAck;
 use ScienceStories\Mqtt\Protocol\ReasonCode;
@@ -160,7 +161,7 @@ final class Client implements ClientInterface
      * - an acknowledgement nobody is waiting for (a PUBACK that arrives after its publish()
      *   gave up) is dropped rather than accumulating.
      *
-     * @var array<int, PubAck|PubComp|SubAck|UnsubAck|null>
+     * @var array<int, PubAck|PubRec|PubComp|SubAck|UnsubAck|null>
      */
     private array $acks = [];
 
@@ -999,8 +1000,9 @@ final class Client implements ClientInterface
      * But holding it forever is the leak this sweep exists to prevent — a handful of
      * timeouts against a broker advertising `receive_maximum: 1` would otherwise exhaust
      * the quota for the life of the process. So entries are reclaimed only well past the
-     * point where an acknowledgement could still plausibly arrive: the full resend budget,
-     * doubled.
+     * point where an acknowledgement could still plausibly arrive: the longest a publish()
+     * can wait, doubled. That is a QoS 2 exchange — one ackTimeout per resend plus one for
+     * each of its two steps, PUBREC and PUBCOMP.
      */
     private function sweepStalledFlowControlSlots(): void
     {
@@ -1008,8 +1010,8 @@ final class Client implements ClientInterface
             return;
         }
 
-        $resendBudget = $this->options->ackTimeout * ($this->options->maxResendAttempts + 1);
-        $grace        = max(1.0, $resendBudget * 2);
+        $longestWait = $this->options->ackTimeout * ($this->options->maxResendAttempts + 2);
+        $grace       = max(1.0, $longestWait * 2);
 
         foreach ($this->flowControl->getTimedOutPackets($grace) as $packetId) {
             $this->logger->warning('Reclaiming flow-control slot for an unacknowledged packet', [
@@ -1022,10 +1024,18 @@ final class Client implements ClientInterface
     }
 
     /**
-     * Block until the broker acknowledges a QoS 1/2 publish, resending with DUP on timeout.
+     * Block until the broker acknowledges a QoS 1/2 publish, resending on timeout.
      *
-     * QoS 1 completes on PUBACK, QoS 2 on PUBCOMP; the PUBREC/PUBREL step in between is
-     * answered by loopOnce() itself.
+     * QoS 1 completes on PUBACK. QoS 2 (MQTT-4.3.3) completes in two steps: PUBREC, which
+     * loopOnce() answers with PUBREL, then PUBCOMP. What a timeout resends depends on the
+     * step: the PUBLISH (with DUP) until PUBREC arrives, and from then on only the PUBREL —
+     * resending the PUBLISH after PUBREL (MQTT-4.3.3-6) is a new message to the receiver,
+     * which then delivers it twice. A PUBREC with a reason code of 0x80 or above ends the
+     * exchange: no PUBREL is sent (MQTT-4.3.3-4), and the error is logged, as a failed
+     * PUBACK or PUBCOMP is.
+     *
+     * One resend budget covers the whole exchange, so QoS 2 gives up within the same bound
+     * as QoS 1 plus one ackTimeout — the flow-control sweep relies on that bound.
      *
      * A resend carries the full topic and no Topic Alias. If the connection was
      * re-established while waiting, an alias would belong to the old connection — the new
@@ -1042,52 +1052,124 @@ final class Client implements ClientInterface
             return 0;
         }
 
-        [$type, $class, $what] = $qos === 1
-            ? [PacketType::PUBACK, PubAck::class, 'PUBACK']
-            : [PacketType::PUBCOMP, PubComp::class, 'QoS2 handshake'];
+        $ackTimeout    = $this->options->ackTimeout;
+        $resends       = 0;
+        $resendPublish = function () use (&$resends, $qos, $packetId, $topic, $payload, $options, $properties): bool {
+            if ($resends >= $this->options->maxResendAttempts) {
+                return false;
+            }
+            $resends++;
+            $this->logger->debug('>> PUBLISH (resend)', ['packetId' => $packetId, 'qos' => $qos, 'attempt' => $resends]);
+            $this->trackWrite($this->encoder->encodePublish(new Publish(
+                $topic,
+                $payload,
+                $options->qos,
+                $options->retain,
+                dup: true,
+                packetId: $packetId,
+                properties: $properties,
+            )));
 
-        $resends = 0;
+            return true;
+        };
+        $resendPubRel = function () use (&$resends, $packetId): bool {
+            if ($resends >= $this->options->maxResendAttempts) {
+                return false;
+            }
+            $resends++;
+            $this->logger->debug('>> PUBREL (resend)', ['packetId' => $packetId, 'attempt' => $resends]);
+            $this->trackWrite($this->pubRelPacket($packetId));
 
+            return true;
+        };
+
+        $waitingFor = PacketType::PUBACK;
+        $pubCompKey = null;
         try {
-            $ack = $this->awaitAck(
-                $type,
-                $packetId,
-                $class,
-                $this->options->ackTimeout,
-                $what,
-                function () use (&$resends, $qos, $packetId, $topic, $payload, $options, $properties): bool {
-                    if ($resends >= $this->options->maxResendAttempts) {
-                        return false;
-                    }
-                    $resends++;
-                    $this->logger->debug($qos === 1 ? '>> PUBLISH (resend)' : '>> PUBLISH (QoS2 resend)', ['packetId' => $packetId, 'attempt' => $resends]);
-                    $this->trackWrite($this->encoder->encodePublish(new Publish(
-                        $topic,
-                        $payload,
-                        $options->qos,
-                        $options->retain,
-                        dup: true,
-                        packetId: $packetId,
-                        properties: $properties,
-                    )));
+            if ($qos === 1) {
+                $this->logPublishOutcome($this->awaitAck(PacketType::PUBACK, $packetId, PubAck::class, $ackTimeout, 'PUBACK', $resendPublish));
 
-                    return true;
-                },
-            );
+                return $packetId;
+            }
+
+            // Registered now rather than after PUBREC: a publish() from inside an onMessage()
+            // handler pumps loopOnce() as well, and can read this exchange's PUBREC and PUBCOMP
+            // before control comes back here. Unregistered, the PUBCOMP was dropped as
+            // unsolicited and this wait sat out a full ackTimeout to resend a PUBREL nobody needed.
+            $pubCompKey              = $this->ackKey(PacketType::PUBCOMP, $packetId);
+            $this->acks[$pubCompKey] = null;
+
+            $waitingFor = PacketType::PUBREC;
+            $pubRec     = $this->awaitAck(PacketType::PUBREC, $packetId, PubRec::class, $ackTimeout, 'PUBREC', $resendPublish);
+            if ($pubRec->isError()) {
+                // loopOnce() sent no PUBREL and returned the flow-control slot; the Packet
+                // Identifier is free again. Nothing more will come for this message.
+                $this->logPublishOutcome($pubRec);
+
+                return $packetId;
+            }
+
+            $waitingFor = PacketType::PUBCOMP;
+            $this->logPublishOutcome($this->awaitAck(PacketType::PUBCOMP, $packetId, PubComp::class, $ackTimeout, 'PUBCOMP', $resendPubRel));
+
+            return $packetId;
         } catch (Timeout) {
-            throw new Timeout("Timed out waiting for $what after $resends resend(s)");
+            throw new Timeout("Timed out waiting for $waitingFor->name after $resends resend(s)");
+        } finally {
+            if ($pubCompKey !== null) {
+                unset($this->acks[$pubCompKey]);
+            }
+        }
+    }
+
+    /** Log how the broker answered a publish; a refusal is a warning and a metric. */
+    private function logPublishOutcome(PubAck|PubRec|PubComp $ack): void
+    {
+        $type = match (true) {
+            $ack instanceof PubAck => 'PUBACK',
+            $ack instanceof PubRec => 'PUBREC',
+            default                => 'PUBCOMP',
+        };
+        if (! $ack->isError()) {
+            $this->logger->info($type, ['packetId' => $ack->packetId, 'reasonCode' => $ack->reasonCode, 'success' => $ack->isSuccess()]);
+
+            return;
         }
 
-        $this->logger->info($qos === 1 ? 'PUBACK' : 'PUBCOMP', ['packetId' => $packetId, 'reasonCode' => $ack->reasonCode, 'success' => $ack->isSuccess()]);
+        if ($ack instanceof PubComp) {
+            // The broker accepted the message at PUBREC; PUBCOMP only retires the Packet
+            // Identifier. Its one error code, 0x92 Packet Identifier not found, is what a
+            // resent PUBREL gets after the first PUBCOMP was lost — "not an error during
+            // recovery" (MQTT 5 §3.7.2.1) — so it is not counted as a failed publish.
+            $this->logger->notice('PUBCOMP: the broker no longer knows this Packet Identifier', [
+                'packetId'   => $ack->packetId,
+                'reasonCode' => sprintf('0x%02X', $ack->reasonCode),
+            ]);
 
-        return $packetId;
+            return;
+        }
+
+        $this->logger->warning('The broker reported a failure for a publish', [
+            'packet'       => $type,
+            'packetId'     => $ack->packetId,
+            'reasonCode'   => sprintf('0x%02X', $ack->reasonCode),
+            'reason'       => $ack->getReasonDescription(),
+            'reasonString' => $ack->getReasonString(),
+        ]);
+        $this->metrics?->increment('publish_failed', 1.0, ['packet' => $type, 'reason' => $ack->reasonCode]);
+    }
+
+    /** PUBREL: fixed-header flags 0b0010 (MQTT-3.6.1-1); no Reason Code means Success. */
+    private function pubRelPacket(int $packetId): string
+    {
+        return chr((PacketType::PUBREL->value << 4) | 0x02) . chr(2) . pack('n', $packetId);
     }
 
     /**
      * What has arrived for $key so far. A method rather than an inline read, because
      * loopOnce() fills the slot behind the caller's back.
      */
-    private function receivedAck(int $key): PubAck|PubComp|SubAck|UnsubAck|null
+    private function receivedAck(int $key): PubAck|PubRec|PubComp|SubAck|UnsubAck|null
     {
         return $this->acks[$key] ?? null;
     }
@@ -1099,7 +1181,7 @@ final class Client implements ClientInterface
     }
 
     /** Hand an inbound acknowledgement to whoever is waiting for it, if anyone is. */
-    private function recordAck(PacketType $type, PubAck|PubComp|SubAck|UnsubAck $ack): void
+    private function recordAck(PacketType $type, PubAck|PubRec|PubComp|SubAck|UnsubAck $ack): void
     {
         $key = $this->ackKey($type, $ack->packetId);
         if (array_key_exists($key, $this->acks)) {
@@ -1115,9 +1197,10 @@ final class Client implements ClientInterface
      * Pump loopOnce() until the acknowledgement for $packetId arrives.
      *
      * Must be called after the request is written and before anything else reads: nothing
-     * can read in between, so an acknowledgement cannot arrive before the key exists.
+     * can read in between, so an acknowledgement cannot arrive before the key exists. A wait
+     * that starts later than that registers its key in advance (see awaitPublishAck()).
      *
-     * @template T of PubAck|PubComp|SubAck|UnsubAck
+     * @template T of PubAck|PubRec|PubComp|SubAck|UnsubAck
      *
      * @param  class-string<T>  $class
      * @param  (Closure(): bool)|null  $onExpiry  called when a wait expires; return true after
@@ -1126,10 +1209,12 @@ final class Client implements ClientInterface
      *
      * @throws Timeout once the wait expires and $onExpiry declines to retry
      */
-    private function awaitAck(PacketType $type, int $packetId, string $class, float $timeout, string $what, ?Closure $onExpiry = null): PubAck|PubComp|SubAck|UnsubAck
+    private function awaitAck(PacketType $type, int $packetId, string $class, float $timeout, string $what, ?Closure $onExpiry = null): PubAck|PubRec|PubComp|SubAck|UnsubAck
     {
-        $key              = $this->ackKey($type, $packetId);
-        $this->acks[$key] = null;
+        $key = $this->ackKey($type, $packetId);
+        // Keep an acknowledgement that has already arrived: a caller may register a key ahead
+        // of the wait — the QoS 2 sender registers PUBCOMP's while it still waits for PUBREC.
+        $this->acks[$key] ??= null;
 
         try {
             $deadline = Clock::now() + $timeout;
@@ -1510,7 +1595,11 @@ final class Client implements ClientInterface
 
                 return true;
             case PacketType::PUBREC->value:
-                // QoS 2 step 1 (Tx): decode PUBREC, respond with PUBREL
+                // QoS 2 step 1 (Tx). Below 0x80 the broker has the message: release it with
+                // PUBREL — also for a publish() that has stopped waiting, so the broker's
+                // side of the exchange can finish. From 0x80 the exchange is over: no PUBREL
+                // (MQTT-4.3.3-4), and the flow-control slot comes back as it would on PUBCOMP
+                // (MQTT 5 §4.9).
                 $pubrec = $this->decoder->decodePubRec($body);
                 $pid    = $pubrec->packetId;
                 $this->logger->debug('<< PUBREC', [
@@ -1518,10 +1607,13 @@ final class Client implements ClientInterface
                     'reasonCode' => $pubrec->reasonCode,
                     'success'    => $pubrec->isSuccess(),
                 ]);
-                // Send PUBREL response (flags 0x02)
-                $pubrel = chr((PacketType::PUBREL->value << 4) | 0x02) . chr(2) . pack('n', $pid);
-                $this->logger->debug('>> PUBREL', ['packetId' => $pid]);
-                $this->trackWrite($pubrel);
+                if ($pubrec->isError()) {
+                    $this->flowControl?->trackAck($pid);
+                } else {
+                    $this->logger->debug('>> PUBREL', ['packetId' => $pid]);
+                    $this->trackWrite($this->pubRelPacket($pid));
+                }
+                $this->recordAck(PacketType::PUBREC, $pubrec);
 
                 return true;
             case PacketType::PUBCOMP->value:

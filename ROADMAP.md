@@ -32,8 +32,8 @@ Defects a first user would hit. All fixable without changing a signature.
   `Events\SubscriptionRefused`. The resubscribe deliberately asks again for the *requested*
   QoS, not the granted one: re-requesting what one broker allowed would lose the
   application's intent across a failover to a broker that supports more.
-- **A conforming QoS 2 sender.** After PUBREC the client must retransmit PUBREL, not the
-  PUBLISH, and must not send PUBREL at all when PUBREC carries an error code (MQTT-4.3.3).
+- ~~**A conforming QoS 2 sender.**~~ Done — after PUBREC only the PUBREL is retransmitted,
+  and a PUBREC with an error code ends the exchange without one (MQTT-4.3.3).
 - **Enforce broker-advertised limits** — Maximum QoS, Retain Available, Maximum Packet Size.
   All are decoded and none are enforced, so the client writes packets the broker rejects.
 - **Parse the complete property set on decode.** All four property parsers stop at the first

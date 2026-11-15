@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **A broker that sends a topic alias the client never allowed now has the connection closed.** At the default `topicAliasMaximum` of 0 the client tells the broker it accepts no aliases, so any alias it receives breaks MQTT-3.3.2-11 — previously such a PUBLISH was still delivered when it also carried its topic. A conforming broker never does this; the change is listed because the observable result differs. See the topic-alias entries under Fixed for what happens on closing.
+- **A message the broker refuses is a warning, not an info line.** A PUBACK or PUBREC with a reason code of 0x80 or above is logged at warning level with the reason and Reason String, and counted on the new `publish_failed` metric (labels `packet`, `reason`). `publish()` still returns the packet identifier; raising is a 3.0 change. A PUBCOMP's only error code, 0x92 Packet Identifier not found, is not a refusal — the message was accepted at PUBREC, and a resent PUBREL gets 0x92 whenever the first PUBCOMP was lost — so it is logged as a notice and not counted.
+- **A QoS 2 timeout names the step it was waiting for** — "Timed out waiting for PUBREC after N resend(s)" or "… PUBCOMP …" instead of "… QoS2 handshake …".
 - **`Events\ServerDisconnect` is also dispatched when the client ends the connection** — a missing PINGRESP (`0x8D`) or a broker protocol violation (`0x94`, `0x82`). The packet is then one the client built, and its `reason_string` property begins "Closed by the client", so listeners can tell which side gave up. In those cases the transport is already closed when listeners run, so a listener's publish can no longer follow the client's own DISCONNECT (MQTT-3.14.4-1).
 
 ### Fixed — topic aliases
@@ -31,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 A granted filter is resubscribed with the QoS that was *requested*, not the possibly lower one the broker granted, so the application's intent survives a failover to a broker that supports more. The granted levels are in `SubscribeResult` and `SubAck::getGrantedQoS()`. A refused request for a filter that is already subscribed leaves the earlier subscription in place; should the broker refuse that too, the next resubscribe forgets it.
 
 Refusals on the automatic resubscribe are reported once it is over, with every filter sent again and the bookkeeping settled. A `SubscriptionRefused` listener may therefore subscribe to a fallback filter, which is remembered like any other subscription, and an exception it throws reaches the caller of `loopOnce()` (PSR-14) without cutting the resubscribe short.
+
+### Fixed — QoS 2 publishing
+
+- **Once PUBREC has arrived, a timeout resends the PUBREL, not the PUBLISH.** The client waited for PUBCOMP alone and, if it was late, resent the PUBLISH with DUP — after PUBREL had already gone out, which MQTT-4.3.3-6 forbids: a receiver that has released the Packet Identifier takes the resent PUBLISH as a new message and delivers it twice. The same happened on the connection that replaces a dropped one. The exchange is now tracked in two steps — the PUBLISH is resent until PUBREC arrives, the PUBREL from then on — under one resend budget.
+- **A PUBREC with a reason code of 0x80 or above ends the exchange.** The client released the message anyway (MQTT-4.3.3-4 forbids a PUBREL there), then waited for a PUBCOMP that never came, resent the PUBLISH and threw `Timeout`. It now sends nothing more, `publish()` returns at once, and the flow-control slot is returned, as MQTT 5 §4.9 requires for an error PUBREC.
 
 ### Fixed — after a connection ends
 
