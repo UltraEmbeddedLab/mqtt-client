@@ -64,8 +64,8 @@ majors.
   package name, with `class_alias()` shims for one minor cycle.
 - **Per-subscription callbacks** — `subscribe('sensors/+', fn (InboundMessage $m) => …)`,
   routed by topic filter, alongside the global `onMessage()`.
-- **Refused operations raise.** A SUBACK refusal, or a PUBACK/PUBCOMP failure code, becomes
-  an exception instead of a log line.
+- **Refused operations raise.** A SUBACK refusal, or a PUBACK/PUBREC refusal, becomes an
+  exception instead of an event, a warning and a metric.
 - **`PublishResult`** replacing `publish(): int`, which returns `0` for "queued offline",
   "dropped, queue full" and "QoS 0 sent" alike.
 - **Typed MQTT 5 properties**, with ordered, repeatable User Properties, replacing
