@@ -1,6 +1,6 @@
 # Upgrade Guide
 
-## 2.1 → 2.2 (unreleased)
+## 2.1 → 2.2
 
 A minor release: no signature changes. Each item below is a defect fix whose effect you can
 observe; if your code relied on the old behaviour, this is what to look at.

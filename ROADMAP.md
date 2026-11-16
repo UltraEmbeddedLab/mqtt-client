@@ -22,13 +22,13 @@ See the [2.1.0 changelog](CHANGELOG.md).
 - ~~Single-slot acknowledgement registers~~ — matched by packet identifier, reentrancy-safe
 - ~~WebSocket framing~~ — atomic frames, continuation frames, masking 74–133x faster
 
-## 2.2 — nothing silently lost ✅ (unreleased)
+## 2.2 — nothing silently lost ✅
 
 Defects a first user would hit. All fixable without changing a signature — and all done; see
-`[Unreleased]` in the changelog and the 2.1 → 2.2 section of the upgrade guide.
+the [2.2.0 changelog](CHANGELOG.md) and the 2.1 → 2.2 section of the [upgrade guide](UPGRADE.md).
 
 - ~~**Resolve inbound topic aliases.**~~ Done — in their own map, apart from outbound
-  aliases, with the receiver's protocol checks (see `[Unreleased]` in the changelog).
+  aliases, with the receiver's protocol checks.
 - ~~**Stop re-subscribing to filters the broker refused.**~~ Done, with an
   `Events\SubscriptionRefused`. The resubscribe deliberately asks again for the *requested*
   QoS, not the granted one: re-requesting what one broker allowed would lose the
