@@ -137,14 +137,39 @@ final class Encoder implements EncoderInterface
                 }
                 $props .= chr(0x27).pack('N', $u32);
             }
+
+            // Request Response Information (0x19) and Request Problem Information (0x17) —
+            // bytes, 0 or 1; any other value is a Protocol Error (§3.1.2.11.6, §3.1.2.11.7).
+            if (array_key_exists('request_response_information', $pkt->properties)) {
+                $props .= chr(0x19).chr(min(1, $this->toByte($pkt->properties['request_response_information'])));
+            }
+            if (array_key_exists('request_problem_information', $pkt->properties)) {
+                $props .= chr(0x17).chr(min(1, $this->toByte($pkt->properties['request_problem_information'])));
+            }
+
+            // User Property (0x26) - may appear more than once
+            if (is_array($pkt->properties['user_properties'] ?? null)) {
+                foreach ($this->normalizeUserProperties($pkt->properties['user_properties']) as [$k, $v]) {
+                    $props .= chr(0x26).Bytes::encodeString($k).Bytes::encodeString($v);
+                }
+            }
+
+            // Authentication Method (0x15) - UTF-8 string; Authentication Data (0x16) - binary,
+            // and only alongside a method: without one it is a Protocol Error (§3.1.2.11.10).
+            if (array_key_exists('authentication_method', $pkt->properties)) {
+                $props .= chr(0x15).Bytes::encodeString($this->toString($pkt->properties['authentication_method']));
+                if (array_key_exists('authentication_data', $pkt->properties)) {
+                    $props .= chr(0x16).Bytes::encodeString($this->toBinary($pkt->properties['authentication_data']));
+                }
+            }
         }
         $vh .= Bytes::encodeVarInt(strlen($props)).$props;
 
         // Payload
         $payload = Bytes::encodeString($pkt->clientId);
         if ($hasWill && $will instanceof WillOptions) {
-            // Will Properties (varint length). MVP: none
-            $payload .= Bytes::encodeVarInt(0);
+            $willProps = $this->encodeWillProperties($will->properties);
+            $payload .= Bytes::encodeVarInt(strlen($willProps)).$willProps;
             // Will Topic and Will Payload
             $payload .= Bytes::encodeString($will->topic);
             $payload .= Bytes::encodeString($will->payload);
@@ -407,6 +432,32 @@ final class Encoder implements EncoderInterface
         }
 
         return $out;
+    }
+
+    /**
+     * Will Properties (§3.1.3.2): the Will Delay Interval, then the properties a PUBLISH
+     * carries — the broker publishes the Will with them. A Topic Alias is not one of them
+     * (it belongs to a connection, and the Will outlives this one) and is left out.
+     *
+     * They used to be dropped entirely, so a Will was always published the moment the
+     * connection was lost: `will_delay_interval`, which lets a device that reconnects within
+     * the delay avoid announcing itself offline, never reached the broker.
+     *
+     * @param  array<string,mixed>|null  $properties
+     */
+    private function encodeWillProperties(?array $properties): string
+    {
+        if ($properties === null || $properties === []) {
+            return '';
+        }
+
+        $out = '';
+        if (array_key_exists('will_delay_interval', $properties)) {
+            $out .= chr(0x18).pack('N', $this->toUInt32($properties['will_delay_interval']));
+        }
+        unset($properties['topic_alias']);
+
+        return $out.$this->encodePublishProperties($properties);
     }
 
     /**

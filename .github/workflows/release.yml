@@ -7,13 +7,36 @@ on:
 permissions: {}
 
 jobs:
+  # The whole CI suite against the released tag. CI on main tested a commit; this proves the
+  # tag itself passes before Packagist is told about it.
+  ci:
+    name: CI on the release tag
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+    permissions:
+      contents: read
+
   packagist:
-    runs-on: ubuntu-latest
     name: Update Packagist
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions: {}
 
     steps:
+      # The credentials travel in the Authorization header, as Packagist's API documentation
+      # recommends, never in the URL, where logs and proxies record them. They reach the
+      # script through env rather than ${{ }} interpolation, and reach curl on stdin rather
+      # than its command line. --fail-with-body makes a refused update fail the job; it used
+      # to pass silently. Packagist's SAFE API token is enough for this endpoint.
       - name: Notify Packagist
+        env:
+          PACKAGIST_USERNAME: ${{ secrets.PACKAGIST_USERNAME }}
+          PACKAGIST_TOKEN: ${{ secrets.PACKAGIST_TOKEN }}
+          REPOSITORY_URL: https://github.com/${{ github.repository }}
         run: |
-          curl -XPOST -H'content-type:application/json' \
-            'https://packagist.org/api/update-package?username=${{ secrets.PACKAGIST_USERNAME }}&apiToken=${{ secrets.PACKAGIST_TOKEN }}' \
-            -d'{"repository":{"url":"https://github.com/${{ github.repository }}"}}'
+          printf 'Authorization: Bearer %s:%s\n' "$PACKAGIST_USERNAME" "$PACKAGIST_TOKEN" \
+            | curl --fail-with-body --silent --show-error -X POST \
+                -H 'Content-Type: application/json' \
+                -H @- \
+                -d "{\"repository\":\"${REPOSITORY_URL}\"}" \
+                https://packagist.org/api/update-package

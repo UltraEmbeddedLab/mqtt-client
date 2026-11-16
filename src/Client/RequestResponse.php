@@ -12,6 +12,7 @@ use ScienceStories\Mqtt\Util\Clock;
 
 use function bin2hex;
 use function random_bytes;
+use function usleep;
 
 /**
  * MQTT 5.0 Request/Response pattern helper.
@@ -84,6 +85,10 @@ final class RequestResponse
 
             $msg = $this->client->awaitMessage($remaining);
             if (!$msg instanceof InboundMessage) {
+                // Early only when the connection has ended and nothing will reconnect it:
+                // back off rather than spin until the deadline.
+                usleep(10_000);
+
                 continue;
             }
 

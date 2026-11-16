@@ -71,19 +71,27 @@ describe('the QoS 2 sender', function (): void {
             ->and(array_column($inner->sentPackets(), 'flags'))->toBe([0x04, 0x0C]);   // QoS 2, then QoS 2 + DUP
     });
 
-    it('resends only the PUBREL once PUBREC has arrived', function (MqttVersion $version): void {
+    it('resends only the PUBREL once PUBREC has arrived, on MQTT 3.1.1', function (): void {
         // Resending the PUBLISH after PUBREL (MQTT-4.3.3-6) is a new message to the
         // receiver, which then delivers it twice — the one thing QoS 2 exists to prevent.
-        [$client, , $inner] = qos2Sender($version);
+        [$client, , $inner] = qos2Sender(MqttVersion::V3_1_1);
         $inner->feedPubRec(1);
 
         expect(fn (): int => $client->publish('t', 'x', exactlyOnce()))->toThrow(Timeout::class, 'PUBCOMP after 2 resend(s)')
             ->and($inner->sentPacketTypes())->toBe([PacketType::PUBLISH->value, PacketType::PUBREL->value, PacketType::PUBREL->value, PacketType::PUBREL->value])
             ->and(substr($inner->written(), -12))->toBe(str_repeat(pubRelBytes(1), 3));
-    })->with(['3.1.1' => [MqttVersion::V3_1_1], '5.0' => [MqttVersion::V5_0]]);
+    });
+
+    it('resends nothing on a live MQTT 5 connection, PUBREL included (MQTT-4.4.0-1)', function (): void {
+        [$client, , $inner] = qos2Sender(MqttVersion::V5_0);
+        $inner->feedPubRec(1);
+
+        expect(fn (): int => $client->publish('t', 'x', exactlyOnce()))->toThrow(Timeout::class, 'PUBCOMP after 0 resend(s)')
+            ->and($inner->sentPacketTypes())->toBe([PacketType::PUBLISH->value, PacketType::PUBREL->value]);
+    });
 
     it('completes when a resent PUBREL is answered', function (): void {
-        [$client, $transport, $inner] = qos2Sender(MqttVersion::V5_0);
+        [$client, $transport, $inner] = qos2Sender(MqttVersion::V3_1_1);
         $inner->feedPubRec(1);
         $pubRels            = 0;
         $transport->onWrite = static function (int $type) use ($inner, &$pubRels): void {

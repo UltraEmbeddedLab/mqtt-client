@@ -22,9 +22,10 @@ See the [2.1.0 changelog](CHANGELOG.md).
 - ~~Single-slot acknowledgement registers~~ — matched by packet identifier, reentrancy-safe
 - ~~WebSocket framing~~ — atomic frames, continuation frames, masking 74–133x faster
 
-## 2.2 — nothing silently lost
+## 2.2 — nothing silently lost ✅ (unreleased)
 
-Defects a first user would hit. All fixable without changing a signature.
+Defects a first user would hit. All fixable without changing a signature — and all done; see
+`[Unreleased]` in the changelog and the 2.1 → 2.2 section of the upgrade guide.
 
 - ~~**Resolve inbound topic aliases.**~~ Done — in their own map, apart from outbound
   aliases, with the receiver's protocol checks (see `[Unreleased]` in the changelog).
@@ -34,18 +35,21 @@ Defects a first user would hit. All fixable without changing a signature.
   application's intent across a failover to a broker that supports more.
 - ~~**A conforming QoS 2 sender.**~~ Done — after PUBREC only the PUBREL is retransmitted,
   and a PUBREC with an error code ends the exchange without one (MQTT-4.3.3).
-- **Enforce broker-advertised limits** — Maximum QoS, Retain Available, Maximum Packet Size.
-  All are decoded and none are enforced, so the client writes packets the broker rejects.
-- **Parse the complete property set on decode.** All four property parsers stop at the first
-  identifier they do not know, discarding every property after it.
-- **A packet-identifier allocator per client instance** that skips identifiers still in
-  flight, replacing the process-global counter. `Util\RandomId::packetId()` stays for
-  anyone calling it directly.
-- **Session persistence that keeps its promise.** QoS 2 state is saved, loaded and then
-  discarded, and in-flight QoS 1/2 publishes are not saved at all.
-- **Full CONNECT and Will property sets.** Six of nine documented CONNECT properties and all
-  Will Properties are dropped by the encoder — including `will_delay_interval`, the main
-  reason to adopt MQTT 5 for device presence.
+- ~~**Enforce broker-advertised limits**~~ Done — a PUBLISH above Maximum QoS or Maximum
+  Packet Size, or retained without Retain Available, is refused before it is sent.
+- ~~**Parse the complete property set on decode.**~~ Done — one decoder for every property
+  MQTT 5 defines, whatever packet carries it.
+- ~~**A packet-identifier allocator per client instance**~~ Done, with the in-flight record
+  it needs: unacknowledged messages are resent at once and in order on reconnect, and MQTT 5
+  no longer resends on a live connection (MQTT-4.4.0-1).
+- ~~**Connections that end cleanly**~~ Done — no reconnect after a normal DISCONNECT or a
+  session takeover, `disconnect()` stops auto-reconnect, a broker that drops every new
+  connection is given up on, and a pcntl signal no longer tears the connection down.
+- ~~**Session persistence that keeps its promise.**~~ Done — both halves of what is in flight
+  are saved on `disconnect()` and finished by the next process; `SubscribeOptions` survive.
+- ~~**Full CONNECT and Will property sets.**~~ Done — every documented CONNECT property is
+  encoded, Will Properties are sent (`WillOptions::withDelayInterval()`), and Options carry
+  User Properties and the two request flags.
 
 ## 2.3 — the rest of MQTT 5, and `wss://`
 

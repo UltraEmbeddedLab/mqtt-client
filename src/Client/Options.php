@@ -37,6 +37,7 @@ final class Options
     /**
      * @param  TlsOptions|array<string, mixed>|null  $tlsOptions  TlsOptions object or raw stream context array
      * @param  list<string>  $messageFilters
+     * @param  array<string, string>|null  $userProperties  MQTT 5 CONNECT User Properties
      */
     public function __construct(
         public string $host,
@@ -88,6 +89,12 @@ final class Options
         // Without a deadline a single lost PINGRESP latches the outstanding-ping flag and
         // keepalive stops for the life of the process, on a socket that still reports open.
         public float $pingResponseTimeout = self::DEFAULT_PING_RESPONSE_TIMEOUT,
+        // MQTT 5 CONNECT User Properties (name => value). Null = none.
+        public ?array $userProperties = null,
+        // MQTT 5 Request Response Information / Request Problem Information. Null = omit, so
+        // the broker's defaults apply (no response information; problem information on).
+        public ?bool $requestResponseInformation = null,
+        public ?bool $requestProblemInformation = null,
     ) {
         // The with*() setters validate, but the constructor is a public entry point too:
         // `new Options(host: 'x', maximumPacketSize: 0)` would otherwise reject the
@@ -176,6 +183,39 @@ final class Options
     }
 
     /**
+     * MQTT 5 User Properties sent with CONNECT — application metadata the broker can see,
+     * such as a firmware version or a deployment name. Ignored on MQTT 3.1.1.
+     *
+     * @param  array<string, string>|null  $properties  name => value
+     */
+    #[NoDiscard]
+    public function withUserProperties(?array $properties): self
+    {
+        return clone($this, ['userProperties' => $properties]);
+    }
+
+    /**
+     * MQTT 5 Request Response Information: ask the broker for the Response Information that
+     * request/response topics can be built on (`ConnAck::getResponseInformation()`).
+     * Ignored on MQTT 3.1.1.
+     */
+    #[NoDiscard]
+    public function withRequestResponseInformation(bool $request = true): self
+    {
+        return clone($this, ['requestResponseInformation' => $request]);
+    }
+
+    /**
+     * MQTT 5 Request Problem Information: false asks the broker to leave Reason Strings and
+     * User Properties out of its acknowledgements. Ignored on MQTT 3.1.1.
+     */
+    #[NoDiscard]
+    public function withRequestProblemInformation(bool $request = true): self
+    {
+        return clone($this, ['requestProblemInformation' => $request]);
+    }
+
+    /**
      * MQTT 5 Session Expiry Interval (seconds). Null to omit property; 0 to expire immediately; >0 for persistent session.
      */
     #[NoDiscard]
@@ -198,7 +238,8 @@ final class Options
     }
 
     /**
-     * Timeout in seconds for waiting on QoS 1/2 acknowledgments before resending.
+     * Seconds to wait for a QoS 1/2 acknowledgement before acting on it again (at least 0.1);
+     * see withMaxResendAttempts().
      */
     #[NoDiscard]
     public function withAckTimeout(float $seconds): self
@@ -207,7 +248,13 @@ final class Options
     }
 
     /**
-     * Maximum number of resend attempts for unacknowledged QoS 1/2 messages.
+     * How many more `ackTimeout` periods publish() waits for an acknowledgement before it
+     * throws `Timeout`.
+     *
+     * On MQTT 3.1.1 the message is resent at the end of each period — the PUBLISH with DUP,
+     * or only the PUBREL once a QoS 2 message has been received. MQTT 5 forbids resending on
+     * a live connection (MQTT-4.4.0-1), so there the periods are only waited. On both, a
+     * reconnect resends every unacknowledged message at once, whatever this is set to.
      */
     #[NoDiscard]
     public function withMaxResendAttempts(int $attempts): self
@@ -221,6 +268,20 @@ final class Options
         return clone($this, ['will' => $will]);
     }
 
+    /**
+     * Reconnect, and resubscribe, when the connection is lost.
+     *
+     * The wait before each attempt doubles from $baseDelay up to $maxDelay, varied by
+     * ±$jitter. $maxAttempts counts attempts in a row without a connection that lasted: one
+     * that succeeds but is dropped again within ten seconds of its resubscribe still counts,
+     * so a broker that accepts each connection and closes it at once is given up on —
+     * `run()` and `messages()` then return — instead of retried forever. A connection that
+     * stays up longer, or a `connect()` of the application's own, starts the count over.
+     * `disconnect()` turns auto-reconnect off until the next `connect()`.
+     *
+     * A broker's DISCONNECT is answered only when it is an error (0x80 or above) other than
+     * 0x8E Session taken over; `Events\ServerDisconnect::$willReconnect` says which.
+     */
     #[NoDiscard]
     public function withAutoReconnect(
         bool $enable = true,

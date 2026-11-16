@@ -9,12 +9,12 @@ use ScienceStories\Mqtt\Client\Options;
 use ScienceStories\Mqtt\Client\PublishOptions;
 use ScienceStories\Mqtt\Events\ServerDisconnect;
 use ScienceStories\Mqtt\Exception\ProtocolError;
-use ScienceStories\Mqtt\Exception\Timeout;
 use ScienceStories\Mqtt\Protocol\MqttVersion;
 use ScienceStories\Mqtt\Protocol\Packet\PacketType;
 use ScienceStories\Mqtt\Protocol\QoS;
 use ScienceStories\Mqtt\Protocol\ReasonCode;
 use ScienceStories\Mqtt\Testing\InMemoryTransport;
+use ScienceStories\Mqtt\Tests\Support\InterceptingTransport;
 use ScienceStories\Mqtt\Util\Bytes;
 
 /** An MQTT 5 property block holding one Topic Alias (0x23). */
@@ -291,16 +291,37 @@ describe('an alias never crosses directions', function (): void {
     it('resends with the full topic, never an alias the connection may no longer have', function (): void {
         // The resend reused the first send's empty topic and alias. After a reconnect inside
         // the wait, the new broker had never seen that alias.
-        [$client, $transport] = aliasClient(brokerMaximum: 5, options: new Options(host: 'fake.broker', clientId: 'resend', version: MqttVersion::V5_0)
-            ->withAckTimeout(0.05)->withMaxResendAttempts(1));
+        $brokerAliases = Bytes::encodeVarInt(3)."\x22".pack('n', 5);   // Topic Alias Maximum 5
+        $inner         = new InMemoryTransport();
+        $transport     = new InterceptingTransport($inner);
+        $inner->feedConnAck(properties: $brokerAliases);
+        $client = new Client(
+            new Options(host: 'fake.broker', clientId: 'resend', version: MqttVersion::V5_0)
+                ->withAutoReconnect(maxAttempts: 3, baseDelay: 0.0, jitter: 0.0),
+            $transport,
+        );
+        $client->connect();
         $client->publish('r/t', 'establish');                 // outbound alias 1
-        $transport->takeWritten();
+        $inner->takeWritten();
 
-        expect(fn (): int => $client->publish('r/t', 'qos1', new PublishOptions(qos: QoS::AtLeastOnce)))
-            ->toThrow(Timeout::class);
+        $published          = 0;
+        $transport->onWrite = static function (int $type) use ($inner, $brokerAliases, &$published): void {
+            if ($type !== PacketType::PUBLISH->value) {
+                return;
+            }
+            if (++$published === 1) {
+                // Sent by alias alone — and the connection drops before the PUBACK.
+                $inner->close();
+                $inner->feedConnAck(sessionPresent: true, properties: $brokerAliases);
+            } else {
+                $inner->feedPubAck(1);
+            }
+        };
+
+        expect($client->publish('r/t', 'qos1', new PublishOptions(qos: QoS::AtLeastOnce)))->toBe(1);
 
         $publishes = array_values(array_filter(
-            $transport->sentPackets(),
+            $inner->sentPackets(),
             static fn (array $p): bool => $p['type'] === PacketType::PUBLISH->value,
         ));
         $resend = $publishes[1];

@@ -6,6 +6,7 @@ namespace ScienceStories\Mqtt\Client;
 
 use Closure;
 use Generator;
+use InvalidArgumentException;
 use LogicException;
 use Psr\EventDispatcher\EventDispatcherInterface;
 use Psr\Log\LoggerInterface;
@@ -24,6 +25,7 @@ use ScienceStories\Mqtt\Events\SubscriptionRefused as EvSubscriptionRefused;
 use ScienceStories\Mqtt\Exception\AuthenticationError;
 use ScienceStories\Mqtt\Exception\MqttException;
 use ScienceStories\Mqtt\Exception\ProtocolError;
+use ScienceStories\Mqtt\Exception\QuotaExceeded;
 use ScienceStories\Mqtt\Exception\ServerError;
 use ScienceStories\Mqtt\Exception\Timeout;
 use ScienceStories\Mqtt\Exception\TransportError;
@@ -38,6 +40,7 @@ use ScienceStories\Mqtt\Protocol\Packet\Publish;
 use ScienceStories\Mqtt\Protocol\Packet\PubRec;
 use ScienceStories\Mqtt\Protocol\Packet\SubAck;
 use ScienceStories\Mqtt\Protocol\Packet\UnsubAck;
+use ScienceStories\Mqtt\Protocol\QoS;
 use ScienceStories\Mqtt\Protocol\ReasonCode;
 use ScienceStories\Mqtt\Protocol\V311\Decoder as V311Decoder;
 use ScienceStories\Mqtt\Protocol\V311\Encoder as V311Encoder;
@@ -46,7 +49,6 @@ use ScienceStories\Mqtt\Protocol\V5\Encoder as V5Encoder;
 use ScienceStories\Mqtt\Session\SessionState;
 use ScienceStories\Mqtt\Util\Bytes;
 use ScienceStories\Mqtt\Util\Clock;
-use ScienceStories\Mqtt\Util\RandomId;
 use ScienceStories\Mqtt\Util\TopicValidator;
 use SplQueue;
 use Throwable;
@@ -63,6 +65,7 @@ use function chunk_split;
 use function count;
 use function explode;
 use function floor;
+use function in_array;
 use function is_array;
 use function is_int;
 use function is_string;
@@ -93,6 +96,22 @@ final class Client implements ClientInterface
      * a GC pause — cannot tear down a healthy link on its own.
      */
     private const int MIN_SILENT_POLLS = 2;
+
+    /** How long a connection must last for the reconnect count to start over. */
+    private const float STABLE_CONNECTION_SECONDS = 10.0;
+
+    /**
+     * DISCONNECT reasons that blame a message rather than the connection (MQTT 5). A broker
+     * that ends a connection with one has refused something just sent — see resendInflight().
+     */
+    private const array MESSAGE_REJECTIONS = [
+        ReasonCode::NotAuthorized,
+        ReasonCode::TopicNameInvalid,
+        ReasonCode::PacketTooLarge,
+        ReasonCode::PayloadFormatInvalid,
+        ReasonCode::RetainNotSupported,
+        ReasonCode::QoSNotSupported,
+    ];
 
     /**
      * Body slice right after a frame times out (see $frameBodySlice). Small, so the next
@@ -130,6 +149,67 @@ final class Client implements ClientInterface
 
     /** Set while attemptReconnect() runs, so a wait inside it cannot reconnect again. */
     private bool $reconnecting = false;
+
+    /**
+     * When the current connection's CONNACK arrived ({@see Clock::now()}); null once a
+     * reconnect has judged it. How long a connection lasted decides whether the reconnect
+     * backoff starts over — see attemptReconnect().
+     */
+    private ?float $connectedAt = null;
+
+    /** QoS 1/2 messages the broker has not finished acknowledging, in resend order. */
+    private readonly OutboundInflight $outbound;
+
+    /** Where allocatePacketId() looks next. */
+    private int $nextPacketId = 1;
+
+    /**
+     * Counts CONNACKs, so a publish() still waiting can tell that its message has already
+     * been resent on a new connection by resendInflight().
+     */
+    private int $connectionEpoch = 0;
+
+    /**
+     * In-flight messages still to resend on this connection, in order, because Receive
+     * Maximum had no room when it opened. They go out as acknowledgements free slots, ahead
+     * of anything new (drainResendBacklog()).
+     *
+     * @var list<int>
+     */
+    private array $resendBacklog = [];
+
+    /** Whether this connection resumed a session, which decides the DUP flag on resends. */
+    private bool $resendDup = false;
+
+    /**
+     * The reason the broker gave for ending the last connection, when it blamed a message
+     * (MESSAGE_REJECTIONS); null otherwise. Read, and cleared, by the next resendInflight().
+     */
+    private ?ReasonCode $rejectedWith = null;
+
+    /**
+     * Whether this connection resends one message at a time — after a connection the broker
+     * ended over a message, so that a refusal can be pinned on the message that caused it.
+     */
+    private bool $probing = false;
+
+    /** While probing: the message sent alone and not yet accepted. */
+    private ?int $probe = null;
+
+    /** Maximum QoS the broker accepts for a PUBLISH on this connection (MQTT 5 CONNACK). */
+    private int $brokerMaximumQos = 2;
+
+    /** Whether the broker accepts retained messages on this connection (MQTT 5 CONNACK). */
+    private bool $brokerRetainAvailable = true;
+
+    /** The largest packet the broker accepts on this connection, if it said (MQTT 5 CONNACK). */
+    private ?int $brokerMaximumPacketSize = null;
+
+    /**
+     * The Client Identifier the broker knows this session by — the one it assigned, if the
+     * application left it empty. The session store is read and written under this key.
+     */
+    private ?string $sessionClientId = null;
 
     /**
      * SubscriptionRefused events from the automatic resubscribe, held until it is over.
@@ -509,26 +589,28 @@ final class Client implements ClientInterface
         // Tell the application — a connection dying silently is how a supervisor ends up
         // watching a live process that will never deliver another message. Closed first, as
         // whenever the client is the side giving up, so listeners all see the same thing: a
-        // transport that is already closed.
+        // transport that is already closed. Connection state is left for the next connect to
+        // reset: resetting it here freed the flow-control slot under a waiting publish().
         $this->transport->close();
-        $this->resetConnectionState();
+        $this->resetFrameState();
 
-        $willReconnect = $this->options->autoReconnect;
+        $willReconnect = $this->willReconnect();
+        if (! $willReconnect) {
+            // Nothing will re-establish this connection, so stop run()/messages() rather
+            // than spinning on a closed transport forever. Before the event, so a listener
+            // that calls connect() in response is not undone.
+            $this->shouldStop = true;
+        }
         $this->events?->dispatch(new EvServerDisconnect(
             new Disconnect(ReasonCode::KeepAliveTimeout->value, ['reason_string' => 'Closed by the client: no PINGRESP within the Ping Response Timeout']),
             $willReconnect,
         ));
-
-        if (! $willReconnect) {
-            // Nothing will re-establish this connection, so stop run()/messages() rather
-            // than spinning on a closed transport forever.
-            $this->shouldStop = true;
-        }
     }
 
     public function __construct(private readonly Options $options, private readonly TransportInterface $transport, private readonly LoggerInterface $logger = new NullLogger(), private readonly ?EventDispatcherInterface $events = null, private readonly ?MetricsInterface $metrics = null)
     {
-        $this->inbound = new SplQueue();
+        $this->inbound  = new SplQueue();
+        $this->outbound = new OutboundInflight();
         if ($this->options->version === MqttVersion::V5_0) {
             // Choose by protocol version
             $this->encoder = new V5Encoder();
@@ -560,8 +642,13 @@ final class Client implements ClientInterface
     public function connect(): ConnectResult
     {
         $this->shouldStop = false;
+        // The application starting over is a fresh start for auto-reconnect too.
+        $this->reconnectAttempts = 0;
 
-        return $this->establishConnection();
+        $result            = $this->establishConnection();
+        $this->connectedAt = Clock::now();
+
+        return $result;
     }
 
     /**
@@ -613,6 +700,12 @@ final class Client implements ClientInterface
             $this->qos2InboundPending = [];
         }
 
+        // The limits the broker sets on what this client may send (MQTT 5), re-derived from
+        // every CONNACK; MQTT 3.1.1 brokers announce none.
+        $this->brokerMaximumQos        = $connack->getMaximumQoS()     ?? 2;
+        $this->brokerRetainAvailable   = $connack->isRetainAvailable() ?? true;
+        $this->brokerMaximumPacketSize = $connack->getMaximumPacketSize();
+
         $assignedId = null;
         if ($this->options->version === MqttVersion::V5_0) {
             $properties = is_array($connack->properties) ? $connack->properties : [];
@@ -641,15 +734,36 @@ final class Client implements ClientInterface
         }
 
         // Restore session state if session store is configured and session was present
-        $clientId = $assignedId ?? $this->options->clientId;
-        if (! $this->sessionRestoreDone && $this->options->sessionStore instanceof SessionStoreInterface && $connack->sessionPresent && ! $this->options->cleanSession) {
-            $this->restoreSession($clientId);
+        $clientId              = $assignedId ?? $this->options->clientId;
+        $this->sessionClientId = $clientId;
+        if (! $this->sessionRestoreDone && $this->options->sessionStore instanceof SessionStoreInterface) {
+            if ($connack->sessionPresent && ! $this->options->cleanSession) {
+                $this->restoreSession($clientId);
+            } else {
+                // The broker has no session to finish these in; kept, they would be replayed
+                // into whichever later session happened to be present.
+                $this->discardStoredInflight($clientId);
+            }
         }
         // Whatever the first connection found, from here on memory is the newer record.
         $this->sessionRestoreDone = true;
 
+        $this->connectionEpoch++;
         $this->metrics?->increment('connections', 1.0, ['version' => $versionStr]);
         $this->metrics?->observe('connect_duration_seconds', Clock::now() - $connectStart);
+
+        $resent = false;
+        try {
+            $this->resendInflight($connack->sessionPresent);
+            $resent = true;
+        } finally {
+            if (! $resent) {
+                // As for a failed handshake: a connection that could not take the resend is
+                // not one to keep, or isOpen() would hide it from auto-reconnect.
+                $this->transport->close();
+                $this->resetFrameState();
+            }
+        }
 
         // Drain offline queue after successful connect
         $this->drainOfflineQueue();
@@ -709,6 +823,15 @@ final class Client implements ClientInterface
                 // Make the local limit a negotiated one rather than a unilateral cut-off.
                 $connectProps['maximum_packet_size'] = $this->options->maximumPacketSize;
             }
+            if ($this->options->requestResponseInformation !== null) {
+                $connectProps['request_response_information'] = $this->options->requestResponseInformation;
+            }
+            if ($this->options->requestProblemInformation !== null) {
+                $connectProps['request_problem_information'] = $this->options->requestProblemInformation;
+            }
+            if ($this->options->userProperties !== null && $this->options->userProperties !== []) {
+                $connectProps['user_properties'] = $this->options->userProperties;
+            }
             if ($connectProps === []) {
                 $connectProps = null;
             }
@@ -762,9 +885,15 @@ final class Client implements ClientInterface
 
     public function disconnect(string $reason = ''): void
     {
+        // The application ended the connection: nothing reconnects it until connect(). Left
+        // unset, the next loopOnce() — inside run(), or a handler's own — auto-reconnected.
+        $this->shouldStop = true;
+
         // Save session state before disconnecting (if persistent session)
         if ($this->options->sessionStore instanceof SessionStoreInterface && ! $this->options->cleanSession) {
-            $this->saveSession($this->options->clientId);
+            // Under the identifier the broker keeps the session by: saved under an empty one
+            // while the broker had assigned another, it was never found again.
+            $this->saveSession($this->sessionClientId ?? $this->options->clientId);
         }
 
         if (! $this->transport->isOpen()) {
@@ -874,6 +1003,20 @@ final class Client implements ClientInterface
 
     public function publish(string $topic, string $payload, ?PublishOptions $options = null): int
     {
+        $written = false;
+
+        return $this->sendPublish($topic, $payload, $options, $written);
+    }
+
+    /**
+     * publish(), telling the caller whether its PUBLISH reached the wire — which the offline
+     * drain needs to know, and cannot learn from the byte counters: resends owed to the
+     * broker may go out during the same call.
+     *
+     * @param  bool  $written  set to true once this message's PUBLISH has been written
+     */
+    private function sendPublish(string $topic, string $payload, ?PublishOptions $options, bool &$written): int
+    {
         TopicValidator::validatePublishTopic($topic);
         $options ??= new PublishOptions();
 
@@ -900,32 +1043,45 @@ final class Client implements ClientInterface
             }
         }
 
+        // What the broker said it will not take is not sent: it would end the connection
+        // (MQTT-3.2.2-11, MQTT-3.2.2-14), and a reconnect would resend it straight into the same
+        // refusal. The size is checked once the packet is encoded, below.
+        $breach = $this->brokerLimitBreach($options->qos, $options->retain);
+        if ($breach instanceof ReasonCode) {
+            throw $this->brokerLimitException($breach, $options->qos, 0);
+        }
+
         $qos      = $options->qos->value;
         $packetId = null;
         if ($qos > 0) {
-            $packetId = RandomId::packetId();
-
-            // Flow control: wait for slot if using QoS 1/2
-            if ($this->flowControl instanceof FlowControl && ! $this->flowControl->canSend()) {
-                $this->logger->debug('Flow control: waiting for slot', [
-                    'inFlight' => $this->flowControl->currentInFlight,
-                    'max'      => $this->flowControl->maxInFlight,
+            // Wait for a flow-control slot, and for the resends owed on this connection to go
+            // out first: a new message must not overtake them.
+            if ($this->mustWaitToPublish()) {
+                $this->logger->debug('Waiting to publish', [
+                    'inFlight'       => $this->flowControl?->currentInFlight,
+                    'max'            => $this->flowControl?->maxInFlight,
+                    'resendsWaiting' => count($this->resendBacklog),
                 ]);
                 // Poll loopOnce to process incoming ACKs while waiting
                 $deadline = Clock::now() + 5.0;
-                // @phpstan-ignore-next-line booleanNot.alwaysTrue - canSend() state changes via loopOnce()
-                while (! $this->flowControl->canSend()) {
+                while ($this->mustWaitToPublish()) {
                     $timeLeft = $deadline - Clock::now();
                     if ($timeLeft <= 0) {
                         throw new Timeout('Flow control: timed out waiting for slot');
                     }
                     if (! $this->loopOnce(max(0.01, $timeLeft)) && ! $this->transport->isOpen()) {
+                        if ($this->reconnecting || $this->connectionEnded()) {
+                            // As in awaitAck(): nothing will reopen it from here.
+                            throw new TransportError('Connection closed while waiting for a flow-control slot');
+                        }
                         // Nothing arrives on a closed transport until something reconnects
                         // it; back off instead of spinning a core until the deadline.
                         usleep(10_000);
                     }
                 }
             }
+            // Only once the PUBLISH can go out: a wait that times out uses none up.
+            $packetId = $this->allocatePacketId();
         }
 
         // Topic aliases (MQTT 5) belong to the client and to this connection. A topic_alias in
@@ -938,8 +1094,10 @@ final class Client implements ClientInterface
         }
         $publishTopic = $topic;
         $publishProps = $properties;
+        $newAlias     = false;
         if ($this->topicAliasManager instanceof TopicAliasManager && $this->options->version === MqttVersion::V5_0) {
             $aliasResult = $this->topicAliasManager->getOrCreateAlias($topic);
+            $newAlias    = $aliasResult['isNew'];
             if ($aliasResult['alias'] !== null) {
                 $publishProps ??= [];
                 $publishProps['topic_alias'] = $aliasResult['alias'];
@@ -963,7 +1121,21 @@ final class Client implements ClientInterface
             properties: $publishProps,
         );
 
-        $data = $this->encoder->encodePublish($pkt);
+        $encoded = false;
+        try {
+            $data   = $this->encoder->encodePublish($pkt);
+            $breach = $this->brokerLimitBreach($options->qos, $options->retain, strlen($data));
+            if ($breach instanceof ReasonCode) {
+                throw $this->brokerLimitException($breach, $options->qos, strlen($data));    // MQTT-3.2.2-15
+            }
+            $encoded = true;
+        } finally {
+            if (! $encoded && $newAlias) {
+                // The PUBLISH that would have set the alias up never goes out: the broker must
+                // not be sent the alias alone next time, for a mapping it never received.
+                $this->topicAliasManager->forgetNew($topic);
+            }
+        }
         $this->logger->debug('>> PUBLISH', [
             'topic'         => $topic,
             'qos'           => $options->qos->value,
@@ -977,8 +1149,8 @@ final class Client implements ClientInterface
         // PSR-14: emit PacketSent event for PUBLISH
         $this->events?->dispatch(new EvPacketSent($data, PacketType::PUBLISH->value));
         $this->trackWrite($data);
+        $written = true;
 
-        // Track in-flight for flow control (a packet identifier exists only for QoS 1/2)
         if ($packetId !== null) {
             $this->flowControl?->trackSend($packetId);
         }
@@ -986,7 +1158,51 @@ final class Client implements ClientInterface
         $this->metrics?->increment('publish_sent', 1.0, ['qos' => $qos]);
         $this->metrics?->size('publish_payload_bytes', strlen($payload), ['qos' => $qos]);
 
-        return $this->awaitPublishAck($qos, (int) $packetId, $topic, $payload, $options, $properties);
+        // In flight from the start of the wait (a packet identifier exists only for QoS 1/2).
+        // Recorded as it must be resent: the full topic and no Topic Alias, which a new
+        // connection would not know.
+        return $this->awaitPublishAck($qos, $packetId === null ? null : new Publish($topic, $payload, $options->qos, $options->retain, packetId: $packetId, properties: $properties));
+    }
+
+    /**
+     * Whether a new QoS 1/2 PUBLISH must wait: for a flow-control slot, or for the resends
+     * owed on this connection, which go first.
+     */
+    private function mustWaitToPublish(): bool
+    {
+        $this->drainResendBacklog();
+
+        return $this->resendBacklog !== [] || ($this->flowControl instanceof FlowControl && ! $this->flowControl->canSend());
+    }
+
+    /**
+     * Which limit the broker set for this connection a PUBLISH would break, if any.
+     *
+     * @param  int|null  $size  the encoded packet's length, once known
+     */
+    private function brokerLimitBreach(QoS $qos, bool $retain, ?int $size = null): ?ReasonCode
+    {
+        if ($qos->value > $this->brokerMaximumQos) {
+            return ReasonCode::QoSNotSupported;
+        }
+        if ($retain && ! $this->brokerRetainAvailable) {
+            return ReasonCode::RetainNotSupported;
+        }
+        if ($size !== null && $this->brokerMaximumPacketSize !== null && $size > $this->brokerMaximumPacketSize) {
+            return ReasonCode::PacketTooLarge;
+        }
+
+        return null;
+    }
+
+    /** The exception a PUBLISH the broker would refuse is turned away with, before sending. */
+    private function brokerLimitException(ReasonCode $breach, QoS $qos, int $size): MqttException
+    {
+        return $breach->toException(match ($breach) {
+            ReasonCode::QoSNotSupported    => "PUBLISH not sent: QoS $qos->value is above the broker's Maximum QoS of $this->brokerMaximumQos",
+            ReasonCode::RetainNotSupported => 'PUBLISH not sent: the broker does not accept retained messages',
+            default                        => "PUBLISH not sent: $size bytes is above the broker's Maximum Packet Size of $this->brokerMaximumPacketSize",
+        });
     }
 
     /**
@@ -997,22 +1213,26 @@ final class Client implements ClientInterface
      * message against Receive Maximum while it is still unacknowledged, and freeing it
      * early lets the client exceed the window the broker granted.
      *
-     * But holding it forever is the leak this sweep exists to prevent — a handful of
-     * timeouts against a broker advertising `receive_maximum: 1` would otherwise exhaust
-     * the quota for the life of the process. So entries are reclaimed only well past the
-     * point where an acknowledgement could still plausibly arrive: the longest a publish()
-     * can wait, doubled. That is a QoS 2 exchange — one ackTimeout per resend plus one for
-     * each of its two steps, PUBREC and PUBCOMP.
+     * But holding the quota forever is the leak this sweep exists to prevent — a handful of
+     * timeouts against a broker advertising `receive_maximum: 1` would otherwise exhaust it
+     * for the life of the connection. So slots are reclaimed only well past the point where
+     * an acknowledgement could still plausibly arrive: the longest a publish() can wait,
+     * doubled. That is a QoS 2 exchange — one ackTimeout per resend plus one for each of its
+     * two steps, PUBREC and PUBCOMP.
+     *
+     * The messages themselves are never let go of on time alone: the broker may still hold
+     * them, and elapsed time does not end a session (MQTT 5 §4.1). They stay in flight — their
+     * identifiers reserved, resent on the next connection — until the broker answers, refuses
+     * them, or the session is gone.
      */
-    private function sweepStalledFlowControlSlots(): void
+    private function sweepStalledInflight(): void
     {
-        if (! $this->flowControl instanceof FlowControl) {
-            return;
-        }
-
         $longestWait = $this->options->ackTimeout * ($this->options->maxResendAttempts + 2);
         $grace       = max(1.0, $longestWait * 2);
 
+        if (! $this->flowControl instanceof FlowControl) {
+            return;
+        }
         foreach ($this->flowControl->getTimedOutPackets($grace) as $packetId) {
             $this->logger->warning('Reclaiming flow-control slot for an unacknowledged packet', [
                 'packetId'     => $packetId,
@@ -1021,73 +1241,71 @@ final class Client implements ClientInterface
             $this->flowControl->trackAck($packetId);
             $this->metrics?->increment('flow_control_slots_reclaimed');
         }
+        $this->drainResendBacklog();
     }
 
     /**
-     * Block until the broker acknowledges a QoS 1/2 publish, resending on timeout.
+     * Block until the broker acknowledges a QoS 1/2 publish.
      *
      * QoS 1 completes on PUBACK. QoS 2 (MQTT-4.3.3) completes in two steps: PUBREC, which
-     * loopOnce() answers with PUBREL, then PUBCOMP. What a timeout resends depends on the
-     * step: the PUBLISH (with DUP) until PUBREC arrives, and from then on only the PUBREL —
-     * resending the PUBLISH after PUBREL (MQTT-4.3.3-6) is a new message to the receiver,
-     * which then delivers it twice. A PUBREC with a reason code of 0x80 or above ends the
-     * exchange: no PUBREL is sent (MQTT-4.3.3-4), and the error is logged, as a failed
-     * PUBACK or PUBCOMP is.
+     * loopOnce() answers with PUBREL, then PUBCOMP. A PUBREC with a reason code of 0x80 or
+     * above ends the exchange: no PUBREL is sent (MQTT-4.3.3-4), and the error is logged, as
+     * a failed PUBACK is.
      *
-     * One resend budget covers the whole exchange, so QoS 2 gives up within the same bound
-     * as QoS 1 plus one ackTimeout — the flow-control sweep relies on that bound.
+     * When to send the message again is the protocol's call, not a timer's. A reconnect
+     * resends everything still in flight at once, in order (resendInflight()). On a live
+     * connection MQTT 5 forbids resending at all (MQTT-4.4.0-1), so there an expired wait is
+     * simply waited again; MQTT 3.1.1 allows it, so there the message goes again — the
+     * PUBLISH with DUP until PUBREC arrives, only the PUBREL after (MQTT-4.3.3-6). Either way
+     * at most `maxResendAttempts` extra periods of `ackTimeout` are waited.
      *
-     * A resend carries the full topic and no Topic Alias. If the connection was
-     * re-established while waiting, an alias would belong to the old connection — the new
-     * broker would reject it, or route it to whatever topic the alias now means.
+     * Giving up does not end the exchange for the broker. The message stays in flight — its
+     * Packet Identifier reserved, owed a resend if the session resumes — until it is
+     * acknowledged, the session is lost, or sweepStalledInflight() gives up on it too.
      *
-     * @param  array<string, mixed>|null  $properties  the caller's properties, alias removed
+     * @param  Publish|null  $inflight  the message as it must be resent; null for QoS 0
      * @return int The packet identifier, or 0 for QoS 0
      *
-     * @throws Timeout if the acknowledgement never arrives within the resend budget
+     * @throws Timeout if the acknowledgement never arrives
+     * @throws TransportError if the connection ends and nothing will reopen it
      */
-    private function awaitPublishAck(int $qos, int $packetId, string $topic, string $payload, PublishOptions $options, ?array $properties): int
+    private function awaitPublishAck(int $qos, ?Publish $inflight): int
     {
-        if ($qos === 0) {
+        if ($qos === 0 || ! $inflight instanceof Publish || $inflight->packetId === null) {
             return 0;
         }
 
-        $ackTimeout    = $this->options->ackTimeout;
-        $resends       = 0;
-        $resendPublish = function () use (&$resends, $qos, $packetId, $topic, $payload, $options, $properties): bool {
-            if ($resends >= $this->options->maxResendAttempts) {
+        $packetId   = $inflight->packetId;
+        $ackTimeout = $this->options->ackTimeout;
+        $periods    = 0;                       // extra periods waited, at most maxResendAttempts
+        $epoch      = $this->connectionEpoch;
+        $onExpiry   = function () use (&$periods, &$epoch, $packetId): bool {
+            if ($periods >= $this->options->maxResendAttempts) {
                 return false;
             }
-            $resends++;
-            $this->logger->debug('>> PUBLISH (resend)', ['packetId' => $packetId, 'qos' => $qos, 'attempt' => $resends]);
-            $this->trackWrite($this->encoder->encodePublish(new Publish(
-                $topic,
-                $payload,
-                $options->qos,
-                $options->retain,
-                dup: true,
-                packetId: $packetId,
-                properties: $properties,
-            )));
+            $periods++;
+            if ($epoch !== $this->connectionEpoch) {
+                // Reconnected meanwhile, and resendInflight() resent it there (or will, as
+                // slots free). Resending again now would only duplicate that.
+                $epoch = $this->connectionEpoch;
 
-            return true;
-        };
-        $resendPubRel = function () use (&$resends, $packetId): bool {
-            if ($resends >= $this->options->maxResendAttempts) {
-                return false;
+                return true;
             }
-            $resends++;
-            $this->logger->debug('>> PUBREL (resend)', ['packetId' => $packetId, 'attempt' => $resends]);
-            $this->trackWrite($this->pubRelPacket($packetId));
+            if ($this->options->version === MqttVersion::V3_1_1 && $this->transport->isOpen() && $this->outbound->has($packetId)) {
+                $this->resendOutbound($packetId, dup: true);
+            }
 
             return true;
         };
 
         $waitingFor = PacketType::PUBACK;
         $pubCompKey = null;
+        $settled    = false;
         try {
+            $this->outbound->add($inflight);
             if ($qos === 1) {
-                $this->logPublishOutcome($this->awaitAck(PacketType::PUBACK, $packetId, PubAck::class, $ackTimeout, 'PUBACK', $resendPublish));
+                $this->logPublishOutcome($this->awaitAck(PacketType::PUBACK, $packetId, PubAck::class, $ackTimeout, 'PUBACK', $onExpiry));
+                $settled = true;
 
                 return $packetId;
             }
@@ -1100,26 +1318,218 @@ final class Client implements ClientInterface
             $this->acks[$pubCompKey] = null;
 
             $waitingFor = PacketType::PUBREC;
-            $pubRec     = $this->awaitAck(PacketType::PUBREC, $packetId, PubRec::class, $ackTimeout, 'PUBREC', $resendPublish);
+            $pubRec     = $this->awaitAck(PacketType::PUBREC, $packetId, PubRec::class, $ackTimeout, 'PUBREC', $onExpiry);
             if ($pubRec->isError()) {
-                // loopOnce() sent no PUBREL and returned the flow-control slot; the Packet
-                // Identifier is free again. Nothing more will come for this message.
+                // loopOnce() sent no PUBREL, returned the flow-control slot and forgot the
+                // message; the Packet Identifier is free again.
                 $this->logPublishOutcome($pubRec);
+                $settled = true;
 
                 return $packetId;
             }
 
             $waitingFor = PacketType::PUBCOMP;
-            $this->logPublishOutcome($this->awaitAck(PacketType::PUBCOMP, $packetId, PubComp::class, $ackTimeout, 'PUBCOMP', $resendPubRel));
+            $this->logPublishOutcome($this->awaitAck(PacketType::PUBCOMP, $packetId, PubComp::class, $ackTimeout, 'PUBCOMP', $onExpiry));
+            $settled = true;
 
             return $packetId;
         } catch (Timeout) {
-            throw new Timeout("Timed out waiting for $waitingFor->name after $resends resend(s)");
+            $sends = $this->outbound->sends($packetId);
+
+            throw new Timeout($sends === 0
+                ? "Timed out waiting for $waitingFor->name; the message was given up on"
+                : "Timed out waiting for $waitingFor->name after ".($sends - 1).' resend(s)');
         } finally {
+            if (! $settled) {
+                // However the wait ended — a timeout, a closed connection, a listener's
+                // exception — publish() stops waiting; the broker may not have.
+                $this->outbound->abandon($packetId, Clock::now());
+            }
             if ($pubCompKey !== null) {
                 unset($this->acks[$pubCompKey]);
             }
         }
+    }
+
+    /**
+     * Write an in-flight message again: its PUBREL once released, otherwise the PUBLISH —
+     * with DUP when the broker may have seen it before (MQTT-3.3.1-1).
+     *
+     * With $onNewConnection, a PUBLISH that the limits the broker announced for this
+     * connection forbid is not sent but given up on: sending it would only get the connection
+     * closed again.
+     */
+    private function resendOutbound(int $packetId, bool $dup, bool $onNewConnection = false): void
+    {
+        $message = $this->outbound->find($packetId);
+        if ($message === null) {
+            return;
+        }
+
+        if ($message['released']) {
+            $this->logger->debug('>> PUBREL (resend)', ['packetId' => $packetId]);
+            $this->trackWrite($this->pubRelPacket($packetId));
+        } else {
+            $publish = $message['publish'];
+            try {
+                $data = $this->encoder->encodePublish(new Publish(
+                    $publish->topic,
+                    $publish->payload,
+                    $publish->qos,
+                    $publish->retain,
+                    $dup,
+                    $packetId,
+                    $publish->properties,
+                ));
+            } catch (InvalidArgumentException|MqttException $e) {
+                // Restored from a store this version of the protocol cannot encode, say. Left
+                // in, it would fail every connection it was resent on.
+                $this->outbound->remove($packetId);
+                $this->logger->warning('Giving up on a message in flight that cannot be encoded', ['packetId' => $packetId, 'error' => $e->getMessage()]);
+                $this->metrics?->increment('inflight_dropped', 1.0, ['reason' => 'unencodable']);
+
+                return;
+            }
+            $breach = $onNewConnection ? $this->brokerLimitBreach($publish->qos, $publish->retain, strlen($data)) : null;
+            if ($breach instanceof ReasonCode) {
+                $this->outbound->remove($packetId);
+                $this->logger->warning('Giving up on a message in flight that this connection does not allow', [
+                    'packetId' => $packetId,
+                    'reason'   => $breach->name,
+                ]);
+                $this->metrics?->increment('inflight_dropped', 1.0, ['reason' => $breach->value]);
+
+                return;
+            }
+            $this->logger->debug('>> PUBLISH (resend)', ['packetId' => $packetId, 'qos' => $publish->qos->value, 'dup' => $dup]);
+            $this->trackWrite($data);
+        }
+        $this->outbound->noteSent($packetId);
+        $this->flowControl?->trackSend($packetId);
+    }
+
+    /**
+     * Resend what the broker has not finished acknowledging, first thing on a new connection
+     * (MQTT-4.4.0-1), in the order the protocol requires (MQTT-4.6.0-1, MQTT-4.6.0-4).
+     *
+     * With the session resumed the broker still has its half: each PUBLISH goes again with
+     * DUP, and a PUBREL for each message already released. Without it the broker kept
+     * nothing: messages no publish() is waiting for go with the old session, and the rest are
+     * published anew, for the application still waiting on them. A released message gets its
+     * PUBREL either way — the broker answers PUBCOMP even for an identifier it does not know
+     * (0x92 on MQTT 5), which is what ends that publish()'s wait.
+     *
+     * What Receive Maximum has no room for yet waits in the backlog and goes out, still in
+     * order, as acknowledgements free slots.
+     *
+     * A message the broker refuses by ending the connection — MQTT 5 says so in the
+     * DISCONNECT reason (MESSAGE_REJECTIONS) — would otherwise be resent first on every new
+     * connection and end each one, until auto-reconnect gave up. So after such a connection
+     * the next one probes: it resends one message at a time, each once the previous was
+     * accepted. Refused again while one message alone was waiting, that message is the one,
+     * and only then is it given up on. A connection that merely dropped proves nothing about
+     * any message, and gives up on none: elapsed time and network failures do not end a
+     * session. (MQTT 3.1.1 has no DISCONNECT reasons, so there nothing is ever given up on;
+     * auto-reconnect's attempt limit bounds the loop instead.)
+     */
+    private function resendInflight(bool $sessionPresent): void
+    {
+        $rejection = $this->rejectedWith;
+        $culprit   = null;
+        if ($rejection instanceof ReasonCode && $this->probe !== null && $this->outbound->has($this->probe)) {
+            // Refused again while it waited alone: this message is the one.
+            $culprit = $this->probe;
+            $this->outbound->remove($culprit);
+            $this->logger->warning('Giving up on a message the broker refused by ending the connection', [
+                'packetId' => $culprit,
+                'reason'   => $rejection->name,
+            ]);
+            $this->metrics?->increment('inflight_dropped', 1.0, ['reason' => $rejection->value]);
+        }
+        $this->probing      = $rejection instanceof ReasonCode && $culprit === null;
+        $this->probe        = null;
+        $this->rejectedWith = null;
+
+        $this->resendBacklog = [];
+        $this->resendDup     = $sessionPresent;
+        if (! $sessionPresent) {
+            $this->outbound->dropAbandoned();
+        }
+
+        $this->resendBacklog = $this->outbound->resendOrder();
+        $this->drainResendBacklog();
+        if ($this->resendBacklog !== []) {
+            $this->logger->info('Receive Maximum reached while resending; the rest follow as slots free up', [
+                'waiting' => count($this->resendBacklog),
+            ]);
+        }
+    }
+
+    /**
+     * Resend what the backlog holds, in order, for as long as Receive Maximum allows. Runs
+     * whenever a slot frees up, and before a new message takes one, so a message owed a
+     * resend is never overtaken by a newer one.
+     */
+    private function drainResendBacklog(): void
+    {
+        while ($this->resendBacklog !== [] && $this->transport->isOpen()) {
+            if ($this->flowControl instanceof FlowControl && ! $this->flowControl->canSend()) {
+                return;
+            }
+            if ($this->probe !== null) {
+                $probe = $this->outbound->find($this->probe);
+                if ($probe !== null && ! $probe['released']) {
+                    return;                                 // the probe is not accepted yet
+                }
+                $this->probe = null;
+            }
+            $packetId = array_shift($this->resendBacklog);
+            $message  = $this->outbound->find($packetId);
+            if ($this->probing && $message !== null && ! $message['released']) {
+                $this->probe = $packetId;
+            }
+            if ($message !== null && $message['released'] && ! $this->resendDup) {
+                $this->logger->warning('Releasing a QoS 2 message on a session the broker did not keep; whether it was delivered is unknown', ['packetId' => $packetId]);
+            }
+            try {
+                $this->resendOutbound($packetId, $this->resendDup, onNewConnection: true);
+            } catch (TransportError $e) {
+                // Called from the receive loop and from publish(): a write that fails means the
+                // connection is gone. Close it so the next loopOnce() reconnects, rather than
+                // throwing from wherever the drain happened to run.
+                $this->logger->info('Transport error while resending; will try to reconnect', ['error' => $e->getMessage()]);
+                $this->resendBacklog = [];
+                $this->transport->close();
+                $this->resetFrameState();
+                $this->noteConnectionLost();
+
+                return;
+            }
+        }
+    }
+
+    /**
+     * The next Packet Identifier not in use (MQTT-2.2.1-3): not held by a message still in
+     * flight, nor by a SUBSCRIBE or UNSUBSCRIBE waiting for its answer. Sequential for each
+     * client, from 1 up to 65,535 and round again. The process-wide counter it replaces could
+     * hand a new QoS 2 message the identifier of one the broker still held, and the broker
+     * then took the new message for a duplicate and dropped it.
+     *
+     * @throws QuotaExceeded when every identifier is in use
+     */
+    private function allocatePacketId(): int
+    {
+        for ($tries = 0; $tries < 0xFFFF; $tries++) {
+            $packetId           = $this->nextPacketId;
+            $this->nextPacketId = $packetId >= 0xFFFF ? 1 : $packetId + 1;
+            if (! $this->outbound->has($packetId)
+                && ! array_key_exists($this->ackKey(PacketType::SUBACK, $packetId), $this->acks)
+                && ! array_key_exists($this->ackKey(PacketType::UNSUBACK, $packetId), $this->acks)) {
+                return $packetId;
+            }
+        }
+
+        throw new QuotaExceeded('Every Packet Identifier is in use by an unacknowledged request');
     }
 
     /** Log how the broker answered a publish; a refusal is a warning and a metric. */
@@ -1208,6 +1618,7 @@ final class Client implements ClientInterface
      * @return T
      *
      * @throws Timeout once the wait expires and $onExpiry declines to retry
+     * @throws TransportError when the connection closes during a reconnect's own wait
      */
     private function awaitAck(PacketType $type, int $packetId, string $class, float $timeout, string $what, ?Closure $onExpiry = null): PubAck|PubRec|PubComp|SubAck|UnsubAck
     {
@@ -1236,6 +1647,12 @@ final class Client implements ClientInterface
                 }
 
                 if (! $this->loopOnce(max(0.01, $timeLeft)) && ! $this->transport->isOpen()) {
+                    if ($this->reconnecting || $this->connectionEnded()) {
+                        // Nothing will reopen the connection: inside a reconnect (they do not
+                        // nest), or once it has ended for good — auto-reconnect off or done
+                        // with. Say so now rather than when the timeout runs out.
+                        throw new TransportError("Connection closed while waiting for $what");
+                    }
                     // Nothing will arrive on a closed transport until something reconnects
                     // it; back off instead of spinning a core until the deadline.
                     usleep(10_000);
@@ -1326,7 +1743,7 @@ final class Client implements ClientInterface
             return new SubscribeResult(0, []);
         }
 
-        $pid  = RandomId::packetId();
+        $pid  = $this->allocatePacketId();
         $data = $this->encoder->encodeSubscribe($sent, $pid, $options);
         $this->logger->debug('>> SUBSCRIBE', ['packetId' => $pid, 'filters' => $sent, 'bytes' => strlen($data), 'preview' => $this->hexPreview($data)]);
         $this->trackWrite($data);
@@ -1419,7 +1836,7 @@ final class Client implements ClientInterface
 
     public function unsubscribe(array $topics): void
     {
-        $pid = RandomId::packetId();
+        $pid = $this->allocatePacketId();
         // Build filters list of strings; encoders accept list<string>
         $filters = [];
         foreach ($topics as $t) {
@@ -1444,8 +1861,9 @@ final class Client implements ClientInterface
 
     public function loopOnce(?float $timeoutSec = 0.1): bool
     {
-        // Auto-reconnect if transport is closed and the feature enabled
-        if (! $this->transport->isOpen() && $this->options->autoReconnect) {
+        // Auto-reconnect if transport is closed and the feature enabled — unless the connection
+        // ended in a way nothing should undo (a normal DISCONNECT, the session taken over).
+        if (! $this->transport->isOpen() && $this->options->autoReconnect && ! $this->shouldStop) {
             $this->logger->info('Transport not open; attempting auto-reconnect');
             $ok = $this->attemptReconnect();
             if (! $ok) {
@@ -1456,7 +1874,7 @@ final class Client implements ClientInterface
         // Before attempting to read, send an automatic PING if needed and reclaim any
         // flow-control quota held by messages the broker has long since abandoned.
         $this->maybeAutoPing();
-        $this->sweepStalledFlowControlSlots();
+        $this->sweepStalledInflight();
         try {
             $frame = $this->readFrame($this->pollTimeout($timeoutSec));
         } catch (Timeout) {
@@ -1471,6 +1889,7 @@ final class Client implements ClientInterface
             $this->logger->info('Transport error on read; will try to reconnect');
             $this->transport->close();
             $this->resetFrameState();
+            $this->noteConnectionLost();
 
             return false;
         }
@@ -1479,6 +1898,8 @@ final class Client implements ClientInterface
             // so the transport is already closed. Report it the way every other
             // transport-level failure in this method does — as "no packet processed" — so
             // the documented bool contract holds and auto-reconnect can take over.
+            $this->noteConnectionLost();
+
             return false;
         }
 
@@ -1569,7 +1990,11 @@ final class Client implements ClientInterface
                     'success'    => $pubAck->isSuccess(),
                 ]);
                 $this->flowControl?->trackAck($pubAck->packetId);
+                $this->outbound->remove($pubAck->packetId);
+                // Recorded before the freed slot is used: a resend that fails to write must
+                // not cost the waiting publish() an acknowledgement already read.
                 $this->recordAck(PacketType::PUBACK, $pubAck);
+                $this->drainResendBacklog();
 
                 return true;
             case PacketType::PUBREL->value:
@@ -1607,13 +2032,16 @@ final class Client implements ClientInterface
                     'reasonCode' => $pubrec->reasonCode,
                     'success'    => $pubrec->isSuccess(),
                 ]);
+                $this->recordAck(PacketType::PUBREC, $pubrec);
                 if ($pubrec->isError()) {
                     $this->flowControl?->trackAck($pid);
+                    $this->outbound->remove($pid);
+                    $this->drainResendBacklog();
                 } else {
                     $this->logger->debug('>> PUBREL', ['packetId' => $pid]);
                     $this->trackWrite($this->pubRelPacket($pid));
+                    $this->outbound->release($pid);
                 }
-                $this->recordAck(PacketType::PUBREC, $pubrec);
 
                 return true;
             case PacketType::PUBCOMP->value:
@@ -1625,7 +2053,9 @@ final class Client implements ClientInterface
                     'success'    => $pubComp->isSuccess(),
                 ]);
                 $this->flowControl?->trackAck($pubComp->packetId);
+                $this->outbound->remove($pubComp->packetId);
                 $this->recordAck(PacketType::PUBCOMP, $pubComp);
+                $this->drainResendBacklog();
 
                 return true;
             case PacketType::DISCONNECT->value:
@@ -1637,21 +2067,26 @@ final class Client implements ClientInterface
                     'reason'     => $disconnect->getReasonDescription(),
                 ]);
 
-                // Dispatch ServerDisconnect event before closing transport
-                $willReconnect = $this->options->autoReconnect && $disconnect->isError();
-                $this->events?->dispatch(new EvServerDisconnect($disconnect, $willReconnect));
-
-                // Reset connection-scoped state
-                $this->resetConnectionState();
+                // Closed before anyone hears of it, as whenever a connection ends: a listener
+                // that publishes must not write to a connection the broker is tearing down.
+                // Connection state is left for the next connect to reset — resetting it here
+                // freed the flow-control slot under a publish() still waiting for one, which
+                // then wrote to the closed transport.
                 $this->transport->close();
+                $this->resetFrameState();
+                $reason             = ReasonCode::tryFrom($disconnect->reasonCode);
+                $this->rejectedWith = in_array($reason, self::MESSAGE_REJECTIONS, true) ? $reason : null;
 
-                if ($this->options->autoReconnect) {
-                    // Keep running; loopOnce will try to reconnect on the next iteration
-                    $this->shouldStop = false;
+                $willReconnect = $this->reconnectsAfter($disconnect) && $this->willReconnect();
+                if ($willReconnect) {
                     $this->logger->info('Will attempt auto-reconnect');
                 } else {
+                    // Also with auto-reconnect on: the event used to say "no reconnect" for a
+                    // normal disconnection while the next loopOnce() reconnected anyway.
                     $this->shouldStop = true;
                 }
+                // Last, so a listener that calls connect() in response is not undone.
+                $this->events?->dispatch(new EvServerDisconnect($disconnect, $willReconnect));
 
                 return true;
             default:
@@ -1685,21 +2120,7 @@ final class Client implements ClientInterface
             return null;
         }
 
-        if ($timeoutSec === null) {
-            // Block until we get something
-            for (; ;) {
-                // @phpstan-ignore-next-line - queue state may change after loopOnce()
-                if (! $this->inbound->isEmpty()) {
-                    /** @var InboundMessage $m */
-                    $m = $this->inbound->dequeue();
-
-                    return $m;
-                }
-                $this->loopOnce(null);
-            }
-        }
-
-        $deadline = Clock::now() + $timeoutSec;
+        $deadline = $timeoutSec === null ? null : Clock::now() + $timeoutSec;
         for (; ;) {
             // @phpstan-ignore-next-line - queue state may change after loopOnce()
             if (! $this->inbound->isEmpty()) {
@@ -1708,13 +2129,22 @@ final class Client implements ClientInterface
 
                 return $m;
             }
-
-            $left = $deadline - Clock::now();
-            if ($left <= 0) {
+            // Nothing more can arrive. Waiting on, every loopOnce() failed at once and this
+            // spun a core until the deadline — forever, with no timeout — after the session
+            // was taken over, a normal DISCONNECT, or any drop without auto-reconnect.
+            if ($this->connectionEnded()) {
                 return null;
             }
 
-            $this->loopOnce($left);
+            $left = $deadline === null ? null : $deadline - Clock::now();
+            if ($left !== null && $left <= 0) {
+                return null;
+            }
+
+            if (! $this->loopOnce($left) && ! $this->transport->isOpen()) {
+                // Auto-reconnect has yet to bring it back: back off rather than spin.
+                usleep(10_000);
+            }
         }
     }
 
@@ -1748,7 +2178,9 @@ final class Client implements ClientInterface
     public function messages(?float $timeoutSec = 0.2): Generator
     {
         for (; ;) {
-            if ($this->shouldStop || $this->stopRequested) {
+            // A connection that ended still owes the application what it delivered — and the
+            // client acknowledged — before it ended; only then does the loop stop.
+            if ($this->stopRequested || ($this->shouldStop && $this->inbound->isEmpty())) {
                 break;
             }
             $msg = $this->awaitMessage($timeoutSec);
@@ -1803,6 +2235,17 @@ final class Client implements ClientInterface
             // instead, this attempt counts as failed, and the outermost loop tries again.
             return false;
         }
+
+        // A connection that stayed up proves the broker reachable and willing: the count and
+        // the backoff start over. One that died sooner keeps counting. Resetting on every
+        // CONNACK let a broker that drops each new connection straight away — a ban applied
+        // after the handshake, another client taking the same Client Identifier on MQTT 3.1.1
+        // — be retried forever at the base delay.
+        if ($this->connectionLasted()) {
+            $this->reconnectAttempts = 0;
+        }
+        $this->connectedAt = null;
+
         if ($this->reconnectAttempts >= $this->options->reconnectMaxAttempts) {
             $this->logger->warning('Auto-reconnect: max attempts reached; stopping');
             $this->shouldStop = true;
@@ -1815,6 +2258,8 @@ final class Client implements ClientInterface
             usleep((int) floor($delay * 1_000_000));
         }
 
+        // Counted before it is made, successful or not; see above for when the count resets.
+        $this->reconnectAttempts++;
         $this->reconnecting = true;
         try {
             $reconnected = $this->reconnectOnce();
@@ -1830,21 +2275,67 @@ final class Client implements ClientInterface
         return $reconnected;
     }
 
-    /** One reconnect attempt: connect, then resubscribe. Failure is counted, not thrown. */
+    /**
+     * Whether the connection that just ended lasted long enough to count as working: then
+     * the reconnect count starts over. A fixed span rather than one derived from the backoff
+     * settings — tied to `reconnectMaxDelay`, a daemon with a long backoff cap on a link that
+     * drops every minute counted every one of those minutes as a failure and gave up.
+     */
+    private function connectionLasted(): bool
+    {
+        return $this->connectedAt !== null && Clock::now() - $this->connectedAt >= self::STABLE_CONNECTION_SECONDS;
+    }
+
+    /**
+     * Whether auto-reconnect will try again once the current connection has ended — what
+     * `ServerDisconnect::$willReconnect` promises, so it must ask exactly what
+     * attemptReconnect() will.
+     */
+    private function willReconnect(): bool
+    {
+        if (! $this->options->autoReconnect || $this->shouldStop) {
+            return false;
+        }
+
+        return $this->connectionLasted() || $this->reconnectAttempts < $this->options->reconnectMaxAttempts;
+    }
+
+    /**
+     * The transport broke under a read. Without auto-reconnect that ends the connection for
+     * good, as every other way a connection ends does: run() and messages() return instead of
+     * polling a dead socket for as long as the process lives.
+     */
+    private function noteConnectionLost(): void
+    {
+        if (! $this->options->autoReconnect) {
+            $this->shouldStop = true;
+        }
+    }
+
+    /**
+     * The connection is gone and nothing will reopen it: neither auto-reconnect nor, yet, the
+     * application. awaitMessage() returns instead of waiting on it.
+     */
+    private function connectionEnded(): bool
+    {
+        return ! $this->transport->isOpen() && (! $this->options->autoReconnect || $this->shouldStop);
+    }
+
+    /** One reconnect attempt: connect, then resubscribe. Failure is logged, not thrown. */
     private function reconnectOnce(): bool
     {
         try {
-            $this->logger->info('Attempting reconnect', ['attempt' => $this->reconnectAttempts + 1]);
+            $this->logger->info('Attempting reconnect', ['attempt' => $this->reconnectAttempts]);
             $this->metrics?->increment('reconnect_attempts');
             $this->establishConnection();
-            $this->reconnectAttempts = 0;
             // Resubscribe
             if ($this->subscriptions !== []) {
                 $this->isResubscribing = true;
                 try {
                     foreach ($this->subscriptions as $topic => $s) {
                         $this->subscribeWith([
-                            ['filter' => $topic, 'qos' => $s['qos']],
+                            // (string): PHP turns the array key of a filter such as "42" into an int.
+                            ['filter' => (string) $topic, 'qos' => $s['qos']],
                         ], $s['options']);
                     }
                 } finally {
@@ -1854,6 +2345,10 @@ final class Client implements ClientInterface
                     $this->isResubscribing = false;
                 }
             }
+            // Only now is the connection up: its lifetime is measured from here, so a broker
+            // that closes it on the resubscribe — while the SUBACK wait runs on — cannot pass
+            // the wait off as a connection that lasted.
+            $this->connectedAt = Clock::now();
 
             return true;
         } catch (Throwable $e) {
@@ -1861,7 +2356,6 @@ final class Client implements ClientInterface
             // never came — is not one to keep: left open, loopOnce() would never reconnect,
             // and the filters not yet sent would stay unsubscribed on a live connection.
             $this->transport->close();
-            $this->reconnectAttempts++;
             $this->logger->warning('Reconnect failed', ['error' => $e->getMessage(), 'attempts' => $this->reconnectAttempts]);
 
             return false;
@@ -1961,6 +2455,19 @@ final class Client implements ClientInterface
     }
 
     /**
+     * Whether a DISCONNECT from the broker is one auto-reconnect should answer.
+     *
+     * Only an error is (0x80 or above): a normal disconnection is the broker ending the
+     * connection on purpose. And not 0x8E Session taken over: another connection with this
+     * Client Identifier now owns the session, and reconnecting would take it back, throw that
+     * client off, and set the two taking turns for as long as both run.
+     */
+    private function reconnectsAfter(Disconnect $disconnect): bool
+    {
+        return $disconnect->isError() && $disconnect->reasonCode !== ReasonCode::SessionTakenOver->value;
+    }
+
+    /**
      * End the connection because the broker broke the protocol.
      *
      * Per §4.13 the receiver of a Protocol Error closes the Network Connection; MQTT 5 lets
@@ -1974,11 +2481,12 @@ final class Client implements ClientInterface
      * not reset here: the next connect does that, and resetting now freed flow-control slots
      * under a publish() still waiting for one, which then wrote to the closed transport.
      *
-     * With auto-reconnect on this returns null and loopOnce() reports "nothing processed",
-     * so the next call reconnects and a pending publish() resends. With it off, nothing would
-     * re-establish the connection, so the violation is thrown.
+     * When auto-reconnect will try again this returns null and loopOnce() reports "nothing
+     * processed", so the next call reconnects and a pending publish() resends. When nothing
+     * will re-establish the connection — auto-reconnect off, or its attempts used up — the
+     * violation is thrown.
      *
-     * @throws ProtocolError when auto-reconnect is off
+     * @throws ProtocolError when nothing will reconnect
      */
     private function abortConnection(ReasonCode $reason, string $message): null
     {
@@ -1994,7 +2502,13 @@ final class Client implements ClientInterface
         $this->transport->close();
         $this->resetFrameState();
 
-        $willReconnect = $this->options->autoReconnect;
+        $willReconnect = $this->willReconnect();
+        if (! $willReconnect) {
+            // As for an inbound DISCONNECT: nothing will re-establish this connection, so
+            // run()/messages() stop instead of spinning on a closed transport. Before the
+            // event, so a listener that calls connect() in response is not undone.
+            $this->shouldStop = true;
+        }
         $this->events?->dispatch(new EvServerDisconnect(
             new Disconnect($reason->value, ['reason_string' => "Closed by the client: $message"]),
             $willReconnect,
@@ -2002,10 +2516,6 @@ final class Client implements ClientInterface
         $this->metrics?->increment('protocol_violations', 1.0, ['reason' => $reason->value]);
 
         if (! $willReconnect) {
-            // As for an inbound DISCONNECT: nothing will re-establish this connection, so
-            // run()/messages() stop instead of spinning on a closed transport.
-            $this->shouldStop = true;
-
             throw new ProtocolError($message, $reason->value);
         }
 
@@ -2116,11 +2626,28 @@ final class Client implements ClientInterface
         }
 
         $pendingQos2 = array_keys($this->qos2InboundPending);
+        $inbound     = [];
+        foreach ($this->qos2InboundPending as $packetId => $message) {
+            $inbound[] = [
+                'packetId'   => $packetId,
+                'topic'      => $message->topic,
+                'payload'    => $message->payload,
+                'qos'        => $message->qos->value,
+                'retain'     => $message->retain,
+                'properties' => $message->properties,
+            ];
+        }
 
+        // Both halves of what is in flight, so a restarted process can finish it: what this
+        // client still owes the broker, and what it received but may not deliver until the
+        // broker releases it. Saving only identifiers, as before, meant a replayed PUBREL
+        // was answered PUBCOMP for a message the application never saw.
         $state = new SessionState(
             subscriptions: $this->subscriptions,
             pendingQos2: $pendingQos2,
             savedAt: time(),
+            outbound: $this->outbound->export(),
+            inboundQos2: $inbound,
         );
 
         try {
@@ -2129,6 +2656,7 @@ final class Client implements ClientInterface
                 'clientId'      => $clientId,
                 'subscriptions' => count($this->subscriptions),
                 'pendingQos2'   => count($pendingQos2),
+                'outbound'      => $this->outbound->count(),
             ]);
         } catch (Throwable $e) {
             $this->logger->warning('Failed to save session', ['error' => $e->getMessage()]);
@@ -2153,18 +2681,62 @@ final class Client implements ClientInterface
                 return;
             }
 
-            // Restore subscriptions
-            /** @var array<string, array{qos: int, options: ?SubscribeOptions}> $restoredSubs */
-            $restoredSubs        = $state->subscriptions;
-            $this->subscriptions = $restoredSubs;
+            $this->subscriptions = $state->subscriptions;
+
+            // What the previous process left in flight. Outbound messages have nobody waiting
+            // for them; resendInflight() — next, on this same connection — sends them in order.
+            $this->outbound->restore($state->outbound, Clock::now());
+            foreach ($state->inboundQos2 as $message) {
+                $this->qos2InboundPending[$message['packetId']] ??= new InboundMessage(
+                    $message['topic'],
+                    $message['payload'],
+                    QoS::ExactlyOnce,
+                    $message['retain'],
+                    false,
+                    $message['packetId'],
+                    $message['properties'],
+                );
+            }
+
+            if ($state->outbound !== [] || $state->inboundQos2 !== []) {
+                // Taken back, so no longer the store's to replay: a process that dies before its
+                // own disconnect() would otherwise leave the next one to resend messages long
+                // since completed — a second delivery of a QoS 2 message — or to deliver a
+                // stale inbound one under an identifier the broker has since reused.
+                $store->save($clientId, new SessionState(subscriptions: $state->subscriptions, savedAt: $state->savedAt));
+            }
 
             $this->logger->debug('Session restored', [
                 'clientId'      => $clientId,
                 'subscriptions' => count($state->subscriptions),
+                'outbound'      => count($state->outbound),
+                'inboundQos2'   => count($state->inboundQos2),
                 'age'           => $state->getAge(),
             ]);
         } catch (Throwable $e) {
             $this->logger->warning('Failed to restore session', ['error' => $e->getMessage()]);
+        }
+    }
+
+    /** Drop the messages in flight from the stored session, keeping its subscriptions. */
+    private function discardStoredInflight(string $clientId): void
+    {
+        $store = $this->sessionStore();
+        if (! $store instanceof SessionStoreInterface) {
+            return;
+        }
+
+        try {
+            $state = $store->load($clientId);
+            if ($state instanceof SessionState && ($state->outbound !== [] || $state->inboundQos2 !== [])) {
+                $store->save($clientId, new SessionState(subscriptions: $state->subscriptions, savedAt: $state->savedAt));
+                $this->logger->info('Discarded stored messages in flight: the broker kept no session', [
+                    'outbound'    => count($state->outbound),
+                    'inboundQos2' => count($state->inboundQos2),
+                ]);
+            }
+        } catch (Throwable $e) {
+            $this->logger->warning('Failed to update the stored session', ['error' => $e->getMessage()]);
         }
     }
 
@@ -2182,12 +2754,14 @@ final class Client implements ClientInterface
         // straight back into this queue, so draining on past a disconnect could only cycle
         // messages through it.
         while ($this->transport->isOpen() && ($msg = $this->offlineQueue->dequeue()) !== null) {
-            $sentBefore = $this->bytesSent;
+            $written = false;
             try {
-                $this->publish($msg['topic'], $msg['payload'], $msg['options']);
+                $this->sendPublish($msg['topic'], $msg['payload'], $msg['options'], $written);
                 $drained++;
             } catch (Throwable $e) {
-                if (($e instanceof TransportError || $e instanceof Timeout) && $this->bytesSent === $sentBefore) {
+                // Whether this message reached the wire — not whether any byte did: resends the
+                // broker is owed may go out while it waits for a flow-control slot.
+                if (($e instanceof TransportError || $e instanceof Timeout) && ! $written) {
                     // Not a byte reached the wire, for a passing reason — the connection was
                     // gone, or no flow-control slot freed up in time — so it is safe to retry
                     // on the next connection, at the head of the queue.

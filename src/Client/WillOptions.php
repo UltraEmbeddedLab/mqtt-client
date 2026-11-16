@@ -17,7 +17,11 @@ final class WillOptions
         public string $payload,
         public QoS $qos = QoS::AtMostOnce,
         public bool $retain = false,
-        /** @var array<string, mixed>|null MQTT 5 Will properties (unused in v3 and MVP) */
+        /**
+         * @var array<string, mixed>|null MQTT 5 Will Properties (§3.1.3.2): will_delay_interval,
+         *                                payload_format_indicator, message_expiry_interval, content_type,
+         *                                response_topic, correlation_data, user_properties. Ignored on MQTT 3.1.1.
+         */
         public ?array $properties = null,
     ) {
     }
@@ -53,5 +57,18 @@ final class WillOptions
     public function withProperties(?array $props): self
     {
         return clone($this, ['properties' => $props]);
+    }
+
+    /**
+     * Have the broker wait before publishing the Will (MQTT 5, Will Delay Interval).
+     *
+     * A device that reconnects within the delay is not announced offline at all — the usual
+     * reason to give a presence Will one. The broker also publishes it early if the session
+     * ends first. Ignored on MQTT 3.1.1, which publishes the Will at once.
+     */
+    #[NoDiscard]
+    public function withDelayInterval(int $seconds): self
+    {
+        return clone($this, ['properties' => ['will_delay_interval' => max(0, $seconds)] + ($this->properties ?? [])]);
     }
 }

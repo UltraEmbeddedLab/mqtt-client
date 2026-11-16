@@ -17,8 +17,9 @@ Modern, production-grade MQTT 3.1.1 & 5.0 client for PHP 8.5+
 - **TLS 1.2+ & mutual TLS (mTLS)** — TLS 1.0/1.1 refused by default (RFC 8996); typed `TlsOptions` for client certificates, CA verification and ALPN
 - **WebSocket transport** (`ws://`) with RFC 6455 framing — `wss://` is not functional yet, see [Known Limitations](#known-limitations)
 - **Auto-reconnect** with exponential backoff and jitter, re-subscribing on its own
-- **QoS 1 and 2 retransmission** on acknowledgement timeout — the PUBLISH with DUP, or only the PUBREL once a QoS 2 message has been received (MQTT-4.3.3)
-- **Session persistence** — subscriptions survive a restart (`FileSessionStore`, or your own `SessionStoreInterface`)
+- **QoS 1 and 2 retransmission as the spec defines it** — every unacknowledged message resent at once and in order on reconnect, the PUBLISH with DUP or only the PUBREL once a QoS 2 message has been received (MQTT-4.3.3, 4.4, 4.6); never on a live MQTT 5 connection
+- **Session persistence** — subscriptions and the messages still in flight survive a restart (`FileSessionStore`, or your own `SessionStoreInterface`)
+- **Broker limits respected** — a PUBLISH above the broker's Maximum QoS or Maximum Packet Size, or retained when it has no retained messages, is refused before it is sent rather than getting the connection closed
 - **Offline message queue** with automatic drain on reconnect
 - **Rate limiter** (token bucket) to keep from flooding a broker
 - **MQTT 5 flow control, shared subscriptions and topic aliases** in both directions
@@ -185,8 +186,8 @@ $client->disconnect();
 | `sessionStore`      | ?SessionStoreInterface | null | Persist subscriptions across restarts (use with `cleanSession: false`) |
 | `topicAliasMaximum` | int         | 0         | MQTT 5 topic aliases the broker may use when sending to this client (0 = none). Outbound aliases follow the broker's limit. |
 | `receiveMaximum`    | int         | 65535     | MQTT 5 flow-control window                              |
-| `ackTimeout`         | float       | 5.0       | Timeout (seconds) waiting for QoS 1/2 ACK before resend                         |
-| `maxResendAttempts`  | int         | 3         | Max resend attempts for unacknowledged QoS 1/2 messages                        |
+| `ackTimeout`         | float       | 5.0       | Seconds to wait for a QoS 1/2 acknowledgement before acting on it again        |
+| `maxResendAttempts`  | int         | 3         | Extra `ackTimeout` periods to wait — resending each time on MQTT 3.1.1; MQTT 5 resends only after a reconnect |
 | `maximumPacketSize`  | int         | 16 MiB    | Largest accepted inbound packet; also sent as MQTT 5 property `0x27`           |
 | `inboundQueueSize`   | int         | 1000      | Bound on the `awaitMessage()`/`messages()` queue (0 = unlimited)               |
 
@@ -400,19 +401,19 @@ Stated up front rather than discovered in production:
   changes its contract and is planned for 3.0. Likewise a message the broker refuses in its
   PUBACK or PUBREC is logged as a warning and counted on the `publish_failed` metric, but
   `publish()` still returns the packet identifier as if the message had been delivered.
-- **Broker-advertised limits are not enforced.** Maximum QoS, Retain Available and Maximum
-  Packet Size from CONNACK are decoded but not checked before publishing.
-- **Session persistence covers subscriptions only.** In-flight QoS 1/2 messages are not
-  saved, so they do not survive a process restart.
+- **Session state is saved on `disconnect()`.** A process that is killed, rather than shut
+  down, loses what was in flight since the last save.
+- **MQTT 5 enhanced authentication (the AUTH packet) is not supported yet**, so brokers that
+  require a challenge/response method cannot be used.
 - **The client is blocking.** There is no ReactPHP/Amp adapter yet; run it in a dedicated
   process or worker.
 - **No Laravel or Symfony bridge yet.**
 
-Each of these is scheduled in the [Roadmap](ROADMAP.md) — most of them for 2.2.
+Each of these is scheduled in the [Roadmap](ROADMAP.md).
 
 ## Documentation
 
-- [Upgrade guide](UPGRADE.md) — 2.0 → 2.1, and 1.x → 2.0
+- [Upgrade guide](UPGRADE.md) — 2.1 → 2.2, 2.0 → 2.1, and 1.x → 2.0
 - [Changelog](CHANGELOG.md) — every change, with the reasoning behind it
 - [Backward Compatibility Promise](docs/backward-compatibility.md) — what semver covers here
 - [Roadmap](ROADMAP.md) — what is planned, and where help is wanted

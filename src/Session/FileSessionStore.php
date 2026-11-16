@@ -8,6 +8,7 @@ use JsonException;
 use RuntimeException;
 use ScienceStories\Mqtt\Contract\SessionStoreInterface;
 
+use function chmod;
 use function file_exists;
 use function file_get_contents;
 use function file_put_contents;
@@ -30,14 +31,16 @@ use const LOCK_EX;
  * Stores MQTT session state as JSON files in a directory.
  * Each client gets its own file based on a hash of its client ID.
  *
- * File Format:
+ * File Format (see SessionState::toArray()):
  * ```json
  * {
  *     "subscriptions": {
  *         "sensors/+/temp": {"qos": 1, "options": null}
  *     },
- *     "pending_qos2": [1234, 5678],
- *     "saved_at": 1699999999
+ *     "pending_qos2": [1234],
+ *     "saved_at": 1699999999,
+ *     "outbound": [{"packet_id": 7, "topic": "a", "payload": "<base64>", "qos": 2, "retain": false, "properties": null, "released": true}],
+ *     "inbound_qos2": [{"packet_id": 1234, "topic": "b", "payload": "<base64>", "qos": 2, "retain": false, "properties": null}]
  * }
  * ```
  *
@@ -46,7 +49,7 @@ use const LOCK_EX;
  * $store = new FileSessionStore('/var/mqtt/sessions');
  *
  * // Or with custom expiry (cleanup stale sessions)
- * $store = new FileSessionStore('/var/mqtt/sessions', 86,400); // 24h expiry
+ * $store = new FileSessionStore('/var/mqtt/sessions', 86_400); // 24h expiry
  *
  * // Use with client options
  * $options = (new Options('broker.local'))
@@ -56,8 +59,9 @@ use const LOCK_EX;
  *
  * Security Notes:
  * - Session directory should not be web-accessible
- * - Files contain subscription info (topic filters) only
- * - No message payloads are stored
+ * - Files hold topic filters and the payloads of messages still in flight when the client
+ *   disconnected — QoS 1/2 messages not yet acknowledged, in either direction — so give the
+ *   directory the same protection as the data itself
  */
 final readonly class FileSessionStore implements SessionStoreInterface
 {
@@ -88,6 +92,8 @@ final readonly class FileSessionStore implements SessionStoreInterface
         if ($written === false) {
             throw new RuntimeException("Failed to write session file: $path");
         }
+        // It may hold message payloads: readable by the owner only.
+        @chmod($path, 0600);
     }
 
     public function load(string $clientId): ?SessionState
@@ -184,7 +190,8 @@ final readonly class FileSessionStore implements SessionStoreInterface
     private function ensureDirectory(): void
     {
         if (! is_dir($this->directory)) {
-            $created = mkdir($this->directory, 0755, true);
+            // Session files may hold message payloads: the directory is the owner's alone.
+            $created = mkdir($this->directory, 0700, true);
             if (! $created) {
                 throw new RuntimeException("Failed to create session directory: $this->directory");
             }

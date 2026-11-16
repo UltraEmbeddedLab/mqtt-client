@@ -97,6 +97,21 @@ final class TopicAliasManager
     }
 
     /**
+     * Take back the alias getOrCreateAlias() has just created for $topic, when the packet that
+     * would have set it up is never sent. Only the newest alias can be taken back, and only
+     * before another is created.
+     */
+    public function forgetNew(string $topic): void
+    {
+        $alias = $this->topicToAlias[$topic] ?? null;
+        if ($alias === null || $alias !== $this->nextAlias - 1) {
+            return;
+        }
+        unset($this->topicToAlias[$topic], $this->aliasToTopic[$alias]);
+        $this->nextAlias--;
+    }
+
+    /**
      * Resolve an alias to its topic (for inbound messages).
      *
      * @param int $alias The alias to resolve

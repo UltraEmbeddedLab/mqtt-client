@@ -12,7 +12,9 @@ $reason       = $event->disconnect->properties['reason_string'] ?? '';
 $closedByUs   = str_starts_with($reason, 'Closed by the client');
 ```
 
-When the client closed the connection, the transport is already closed while listeners run.
+Whichever side ended the connection, the transport is already closed while listeners run, so
+a listener's publish cannot go out on a connection that is being torn down: it is queued
+offline if the offline queue is enabled, and otherwise throws `TransportError`.
 
 ## Overview
 
@@ -142,17 +144,30 @@ $options = $options->withAutoReconnect(
 
 - On error disconnect (code >= 0x80): Auto-reconnect attempts
 - On normal disconnect (code 0x00): No auto-reconnect
-- `ServerDisconnect::$willReconnect` indicates if reconnect will be attempted
+- On Session taken over (0x8E): No auto-reconnect — see below
+- `ServerDisconnect::$willReconnect` says which; when it is `false`, `run()` and
+  `messages()` stop and `loopOnce()` does not reconnect until you call `connect()`
+
+`maxAttempts` counts attempts in a row without a connection that lasted: a reconnect that
+succeeds but is dropped again within ten seconds of its resubscribe still counts. So a
+broker that accepts every connection and closes it at once is given up on after
+`maxAttempts`, rather than retried forever at `baseDelay`. A connection that stays up longer,
+or a `connect()` of your own, starts the count over. `willReconnect` accounts for this: once
+the attempts are used up it is `false`.
 
 ## Common Scenarios
 
 ### Session Taken Over (0x8E)
 
-Another client connected with the same Client ID:
+Another client connected with the same Client ID, and the broker gave it this session. The
+client does not reconnect: taking the session back would throw the other client off, which
+— reconnecting too — would take it back in turn, and the two would alternate for as long as
+both run. (MQTT 3.1.1 brokers just close the socket, so there the client cannot tell a
+takeover from a network failure; reconnecting is bounded by `maxAttempts` as above.)
 
 ```php
 if ($disconnect->reasonCode === 0x8E) {
-    // Use unique client ID per device
+    // Two processes share a Client ID: give each its own.
     $newClientId = generateUniqueId();
 }
 ```

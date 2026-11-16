@@ -1,5 +1,65 @@
 # Upgrade Guide
 
+## 2.1 → 2.2 (unreleased)
+
+A minor release: no signature changes. Each item below is a defect fix whose effect you can
+observe; if your code relied on the old behaviour, this is what to look at.
+
+### MQTT 5 no longer resends on a live connection
+
+MQTT 5 allows resending a PUBLISH or PUBREL only after a reconnect with the session resumed
+(MQTT-4.4.0-1). On MQTT 5, `maxResendAttempts` is now the number of extra `ackTimeout`
+periods `publish()` waits — nothing is sent again while the connection lasts — and the
+`Timeout` message reports `0 resend(s)`. On MQTT 3.1.1 nothing changes. On both, every
+unacknowledged message is resent at once, in order, as soon as a connection is
+re-established — where before each waiting `publish()` resent only when its own timer ran
+out (about 3 s instead of 40 ms against Mosquitto with `ackTimeout` 3).
+
+### Packet identifiers are per client and start at 1
+
+Each `Client` now allocates its own identifiers, skipping any still in use. Tests that
+expected identifiers to continue from another client in the same process — or called
+`RandomId::resetPacketId()` to get 1 — now get 1 from every new client.
+`Util\RandomId::packetId()` still exists for code that calls it directly.
+
+### `publish()` refuses what the broker said it will not accept
+
+On MQTT 5, a PUBLISH above the CONNACK's Maximum QoS or Maximum Packet Size, or retained when
+Retain Available is 0, now throws before anything is sent — the exception
+`ReasonCode::QoSNotSupported`, `PacketTooLarge` or `RetainNotSupported` maps to — where the
+broker used to close the connection. A `publish()` waiting when the connection ends and
+nothing will reopen it throws `TransportError` at once instead of waiting out its resend
+periods.
+
+### Session files now hold message payloads
+
+With a session store and a persistent session, `disconnect()` also saves the QoS 1/2
+messages still in flight, payloads included. Protect the session directory like the data
+itself. Files written by 2.1 load unchanged.
+
+### When the connection ends, more things stop
+
+- `disconnect()` turns auto-reconnect off until the next `connect()`; the next
+  `loopOnce()` used to reconnect straight away.
+- After a broker's DISCONNECT with `0x00` (normal) or `0x8E` (session taken over), the
+  client no longer reconnects, as `ServerDisconnect::$willReconnect` already said. `run()`
+  and `messages()` return; call `connect()` to start again.
+- Without auto-reconnect, `run()` and `messages()` return when the connection drops, and
+  `awaitMessage()` returns `null` instead of waiting on a dead socket.
+- Auto-reconnect gives up after `reconnectMaxAttempts` on a broker that drops every new
+  connection straight away; only a connection that lasts ten seconds, or your own
+  `connect()`, starts the count over.
+
+### `ServerDisconnect` listeners run with the transport already closed
+
+For a broker's DISCONNECT too, not only when the client ends the connection. A listener's
+`publish()` goes to the offline queue, or throws `TransportError`.
+
+### A signal no longer drops the connection
+
+A pcntl signal arriving while the client waits for data makes `loopOnce()` return `false`
+instead of closing the connection. A handler that calls `stop()` ends `run()` at once.
+
 ## 2.0 → 2.1
 
 A minor release. No source change is required; everything below is either the new runtime
