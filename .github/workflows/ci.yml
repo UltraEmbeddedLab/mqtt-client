@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 # Every `uses:` is pinned to a commit SHA with the tag in a trailing comment. A mutable
-# tag lets a compromised action repository run arbitrary code with CODECOV_TOKEN in scope.
+# tag lets a compromised action repository run arbitrary code with the job's token in scope.
 
 jobs:
   tests:
@@ -32,6 +32,10 @@ jobs:
 
     name: PHP ${{ matrix.php }} Tests
     continue-on-error: ${{ matrix.experimental }}
+    permissions:
+      contents: read
+      # Codecov verifies the upload with GitHub's OIDC token: no secret to set, rotate or leak.
+      id-token: write
 
     env:
       MQTT_HOST: 127.0.0.1
@@ -85,14 +89,16 @@ jobs:
       - name: Run tests with coverage
         run: vendor/bin/pest --coverage --coverage-clover=coverage.xml --min=50
 
+      # A refused upload shows as a failed step without failing the build. Behind
+      # fail_ci_if_error: false it failed on every run ("Token required") and nobody saw.
       - name: Upload coverage to Codecov
         if: matrix.php == '8.5'
+        continue-on-error: true
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: coverage.xml
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
+          fail_ci_if_error: true
 
       - name: Stop Mosquitto
         if: always()

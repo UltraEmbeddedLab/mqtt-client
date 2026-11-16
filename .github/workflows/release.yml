@@ -15,23 +15,34 @@ jobs:
     secrets: inherit
     permissions:
       contents: read
+      id-token: write          # ci.yml's coverage upload authenticates with OIDC
 
   packagist:
     name: Update Packagist
     needs: ci
     runs-on: ubuntu-latest
     permissions: {}
+    env:
+      PACKAGIST_USERNAME: ${{ secrets.PACKAGIST_USERNAME }}
+      PACKAGIST_TOKEN: ${{ secrets.PACKAGIST_TOKEN }}
 
     steps:
+      # Packagist's GitHub integration picks a new tag up by itself; this call only hurries it
+      # along, so it needs the PACKAGIST_USERNAME and PACKAGIST_TOKEN secrets, and without
+      # them the release is not failed for it.
+      - name: No Packagist credentials
+        if: env.PACKAGIST_TOKEN == '' || env.PACKAGIST_USERNAME == ''
+        run: echo "::notice::PACKAGIST_USERNAME / PACKAGIST_TOKEN are not set; Packagist updates through its GitHub integration."
+
       # The credentials travel in the Authorization header, as Packagist's API documentation
       # recommends, never in the URL, where logs and proxies record them. They reach the
       # script through env rather than ${{ }} interpolation, and reach curl on stdin rather
       # than its command line. --fail-with-body makes a refused update fail the job; it used
-      # to pass silently. Packagist's SAFE API token is enough for this endpoint.
+      # to pass silently — which hid that the secrets had never been set. Packagist's SAFE
+      # API token is enough for this endpoint.
       - name: Notify Packagist
+        if: env.PACKAGIST_TOKEN != '' && env.PACKAGIST_USERNAME != ''
         env:
-          PACKAGIST_USERNAME: ${{ secrets.PACKAGIST_USERNAME }}
-          PACKAGIST_TOKEN: ${{ secrets.PACKAGIST_TOKEN }}
           REPOSITORY_URL: https://github.com/${{ github.repository }}
         run: |
           printf 'Authorization: Bearer %s:%s\n' "$PACKAGIST_USERNAME" "$PACKAGIST_TOKEN" \
