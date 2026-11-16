@@ -62,6 +62,7 @@
     "test": "pest",
     "test:unit": "pest --testsuite=Unit",
     "test:integration": "pest --testsuite=Integration",
+    "test:interop": "pest --testsuite=Interop",
     "test:coverage": "pest --coverage",
     "type-coverage": "pest --type-coverage",
     "stan": "phpstan analyse --memory-limit=1G",

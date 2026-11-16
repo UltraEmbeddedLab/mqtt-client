@@ -11,3 +11,48 @@ services:
       interval: 5s
       timeout: 10s
       retries: 5
+
+  # The interop brokers start only when asked for (`docker compose --profile emqx up -d
+  # --wait`), so a plain `docker compose up` still brings up Mosquitto alone. Each listens on
+  # its own host port, so all of them can run beside Mosquitto at once; tests/Interop finds
+  # one through MQTT_BROKER, MQTT_HOST and MQTT_PORT (and MQTT_WS_PORT, MQTT_WS_PATH).
+  # Versions are pinned: a broker that changes behaviour under a floating tag is exactly what
+  # these tests exist to notice, deliberately, when the pin is moved.
+  # Mosquitto 2.1's websockets listener answers 404 to every upgrade (any client, Node's
+  # own too); 2.0 is the Mosquitto the WebSocket transport is tested against.
+  mosquitto-2.0:
+    image: eclipse-mosquitto:2.0.22
+    profiles: [mosquitto-2.0, interop]
+    ports:
+      - "1886:1883"
+      - "9002:9001"           # WebSocket, any path
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -i healthcheck -W 3 || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
+  emqx:
+    image: emqx/emqx:5.8.6
+    profiles: [emqx, interop]
+    ports:
+      - "1884:1883"
+      - "8083:8083"           # WebSocket, path /mqtt
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+
+  hivemq:
+    image: hivemq/hivemq-ce:2024.9
+    profiles: [hivemq, interop]
+    ports:
+      - "1885:1883"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/1883' || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 12

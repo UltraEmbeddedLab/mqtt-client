@@ -16,6 +16,7 @@ use ScienceStories\Mqtt\Protocol\Packet\PacketType;
 use ScienceStories\Mqtt\Protocol\QoS;
 use ScienceStories\Mqtt\Testing\InMemoryTransport;
 use ScienceStories\Mqtt\Tests\Support\InterceptingTransport;
+use ScienceStories\Mqtt\Tests\Support\RecordingLogger;
 use ScienceStories\Mqtt\Util\Bytes;
 use ScienceStories\Mqtt\Util\RandomId;
 
@@ -500,6 +501,42 @@ describe('once nothing will reconnect', function (): void {
         $client->loopOnce(0.0);
 
         expect($transport->countSent(PacketType::CONNECT))->toBe(3);
+    });
+
+    it('stops reading the closed transport, and saying it will reconnect', function (): void {
+        // After a takeover every loopOnce() read the closed socket and logged "will try to
+        // reconnect" — on every call, for as long as a daemon's own loop kept calling.
+        $transport = new InMemoryTransport();
+        $transport->feedConnAck(properties: "\x00");
+        $logger = new RecordingLogger();
+        $client = new Client(
+            new Options(host: 'fake.broker', clientId: 'taken', version: MqttVersion::V5_0)
+                ->withAutoReconnect(maxAttempts: 3, baseDelay: 0.0, jitter: 0.0),
+            $transport,
+            $logger,
+        );
+        $client->connect();
+        $transport->feedDisconnect(0x8E);                                   // session taken over
+        $client->loopOnce(0.0);
+        $before = count($logger->messages);
+        for ($i = 0; $i < 3; $i++) {
+            $client->loopOnce(0.0);
+        }
+
+        expect(array_slice($logger->messages, $before))->toBe([]);
+    });
+
+    it('says the connection is lost, not that it will reconnect, when nothing will', function (): void {
+        $transport = new InMemoryTransport();
+        $transport->feedConnAck();
+        $logger = new RecordingLogger();
+        $client = new Client(new Options(host: 'fake.broker', clientId: 'no-reconnect'), $transport, $logger);
+        $client->connect();
+        $transport->closeByPeer();
+        $client->loopOnce(0.0);
+
+        expect($logger->messages)->toContain('Transport error on read; connection lost')
+            ->not->toContain('Transport error on read; will try to reconnect');
     });
 });
 

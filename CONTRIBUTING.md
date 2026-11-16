@@ -51,9 +51,10 @@ CI runs, so if it is green locally, CI will be green.
 Individual pieces:
 
 ```bash
-composer test              # both suites
+composer test              # every suite
 composer test:unit         # unit only — no broker needed
 composer test:integration  # needs the Docker broker
+composer test:interop      # broker-dependent behaviour; see below for other brokers
 composer test:coverage     # line coverage
 composer type-coverage     # type coverage (CI enforces 85%)
 composer stan              # PHPStan, level max
@@ -67,6 +68,27 @@ composer lint:workflows    # parse .github/workflows/*.yml
 The integration tests skip themselves when no broker answers on `MQTT_HOST:MQTT_PORT`
 (default `127.0.0.1:1883`). **If you see "MQTT broker not available", start Docker — you
 are not running the tests that matter.** CI fails the build if they skip.
+
+### Against other brokers
+
+`tests/Interop` checks what depends on the broker — exactly-once delivery across a dropped
+link, session takeover, a delayed Will, the broker's Maximum Packet Size, topic aliases it
+sends, subscriptions it refuses, WebSocket. CI runs it against Mosquitto 2.1 (in the main
+job), Mosquitto 2.0, EMQX and HiveMQ CE. `docker-compose.yml` has each of them behind a
+profile, on its own port, so they can run side by side:
+
+```bash
+docker compose --profile interop up -d --wait          # all of them, beside Mosquitto
+
+MQTT_BROKER=emqx MQTT_PORT=1884 MQTT_WS_PORT=8083 composer test:interop
+MQTT_BROKER=hivemq MQTT_PORT=1885 composer test:interop
+MQTT_BROKER=mosquitto MQTT_PORT=1886 MQTT_WS_PORT=9002 composer test:interop   # 2.0
+```
+
+`MQTT_BROKER` says which broker it is, for the tests whose expectations differ: only EMQX
+sends topic aliases to clients or refuses a subscription (`#`) by default, so those tests
+skip elsewhere and say why. A test that fails against one broker and passes against the
+others is the point of the suite — look at what that broker does before changing the test.
 
 For unit tests that need a scripted peer, use `ScienceStories\Mqtt\Testing\InMemoryTransport`
 rather than a live broker. It is a six-method `TransportInterface` with `feedConnAck()`,

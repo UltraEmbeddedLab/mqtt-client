@@ -15,6 +15,7 @@ use Throwable;
 
 use function base64_encode;
 use function chr;
+use function count;
 use function explode;
 use function fclose;
 use function feof;
@@ -26,10 +27,10 @@ use function is_resource;
 use function max;
 use function ord;
 use function pack;
+use function preg_match;
 use function random_bytes;
 use function sha1;
 use function sprintf;
-use function str_contains;
 use function str_repeat;
 use function stream_context_create;
 use function stream_set_blocking;
@@ -37,6 +38,7 @@ use function stream_set_timeout;
 use function stream_socket_client;
 use function strlen;
 use function strpos;
+use function strtolower;
 use function substr;
 use function trim;
 use function unpack;
@@ -300,29 +302,37 @@ final class WsTransport implements TransportInterface
         $response        = substr($this->rawBuffer, 0, $end + 4);
         $this->rawBuffer = substr($this->rawBuffer, $end + 4);
 
-        // Validate response
+        $this->checkHandshakeResponse($response, $key);
+    }
+
+    /**
+     * Accept the server's answer to the upgrade only if it is a 101 carrying the
+     * Sec-WebSocket-Accept that $key calls for (RFC 6455 §4.1).
+     *
+     * Header names are matched without regard to case (RFC 9110 §5.1): EMQX, for one, sends
+     * `sec-websocket-accept`, and a case-sensitive match refused every connection to it.
+     *
+     * @throws TransportError
+     */
+    private function checkHandshakeResponse(string $response, string $key): void
+    {
         $lines      = explode("\r\n", $response);
         $statusLine = $lines[0];
-        if (!str_contains($statusLine, '101')) {
+        if (preg_match('#^HTTP/1\.1 101(?:\s|$)#', $statusLine) !== 1) {
             throw new TransportError("WebSocket: Handshake failed: $statusLine");
         }
 
-        // Verify Sec-WebSocket-Accept
-        $expectedAccept = base64_encode(sha1($key . self::WS_GUID, true));
-        $found          = false;
+        $accept = null;
         foreach ($lines as $line) {
-            if (str_contains($line, 'Sec-WebSocket-Accept')) {
-                $parts  = explode(':', $line, 2);
-                $accept = trim($parts[1] ?? '');
-                if ($accept === $expectedAccept) {
-                    $found = true;
-                }
+            $parts = explode(':', $line, 2);
+            if (count($parts) === 2 && strtolower(trim($parts[0])) === 'sec-websocket-accept') {
+                $accept = trim($parts[1]);
 
                 break;
             }
         }
 
-        if (!$found) {
+        if ($accept !== base64_encode(sha1($key . self::WS_GUID, true))) {
             throw new TransportError('WebSocket: Invalid Sec-WebSocket-Accept in handshake response');
         }
     }

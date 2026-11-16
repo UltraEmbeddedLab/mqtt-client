@@ -1497,11 +1497,11 @@ final class Client implements ClientInterface
                 // Called from the receive loop and from publish(): a write that fails means the
                 // connection is gone. Close it so the next loopOnce() reconnects, rather than
                 // throwing from wherever the drain happened to run.
-                $this->logger->info('Transport error while resending; will try to reconnect', ['error' => $e->getMessage()]);
                 $this->resendBacklog = [];
                 $this->transport->close();
                 $this->resetFrameState();
                 $this->noteConnectionLost();
+                $this->logger->info($this->willReconnect() ? 'Transport error while resending; will try to reconnect' : 'Transport error while resending; connection lost', ['error' => $e->getMessage()]);
 
                 return;
             }
@@ -1871,6 +1871,17 @@ final class Client implements ClientInterface
             }
         }
 
+        // An ended connection stays ended until something reopens it. Reading it only threw,
+        // and logged "will try to reconnect" on every call though nothing would (after a
+        // takeover, a DISCONNECT, disconnect()). A transport closed from outside still ends
+        // the connection, so that run() and messages() return.
+        if (! $this->transport->isOpen()) {
+            $this->resetFrameState();
+            $this->noteConnectionLost();
+
+            return false;
+        }
+
         // Before attempting to read, send an automatic PING if needed and reclaim any
         // flow-control quota held by messages the broker has long since abandoned.
         $this->maybeAutoPing();
@@ -1884,12 +1895,12 @@ final class Client implements ClientInterface
             $this->expirePingIfSilent();
 
             return false; // nothing available
-        } catch (TransportError) {
-            // Transport broke; attempt to reconnect next iteration
-            $this->logger->info('Transport error on read; will try to reconnect');
+        } catch (TransportError $e) {
+            // Transport broke; the next loopOnce() reconnects if anything will.
             $this->transport->close();
             $this->resetFrameState();
             $this->noteConnectionLost();
+            $this->logger->info($this->willReconnect() ? 'Transport error on read; will try to reconnect' : 'Transport error on read; connection lost', ['error' => $e->getMessage()]);
 
             return false;
         }

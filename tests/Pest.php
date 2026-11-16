@@ -1,7 +1,7 @@
 <?php
 
 declare(strict_types=1);
-uses()->in('Unit', 'Integration');
+uses()->in('Unit', 'Integration', 'Interop');
 
 if (function_exists('typeCoverage')) {
     $tc = typeCoverage();

@@ -394,7 +394,7 @@ Stated up front rather than discovered in production:
 
 - **`wss://` does not work.** `WsTransport` performs the HTTP upgrade before TLS can be
   enabled, so only `ws://` completes a handshake. `ws://` itself — masking, fragmented
-  messages, ping/pong — is unit-tested and verified against Mosquitto 2.0.
+  messages, ping/pong — is unit-tested and runs in CI against Mosquitto 2.0 and EMQX.
 - **A refused subscription is reported, not raised.** The client stops resubscribing to a
   filter the broker refused and dispatches `Events\SubscriptionRefused`; `subscribeWith()`
   also returns the codes. But `subscribe()` returns normally either way — making it throw

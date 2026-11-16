@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`WsTransport` connects to EMQX.** The upgrade response's `Sec-WebSocket-Accept` header was matched case-sensitively; EMQX sends header names in lower case, as HTTP allows (RFC 9110 §5.1), so every WebSocket connection to it failed with "Invalid Sec-WebSocket-Accept". The status line must now also be exactly `HTTP/1.1 101`, not merely contain "101".
+- **`loopOnce()` on an ended connection no longer logs "will try to reconnect" on every call.** After the session was taken over, a normal DISCONNECT, `disconnect()`, or a dropped link without auto-reconnect, each call read the closed socket and logged that it would reconnect, though nothing would. It now returns at once; a read error says "connection lost" when no reconnect follows.
+
+### Added
+
+- **Interoperability suite** (`tests/Interop`, `composer test:interop`), run in CI against Mosquitto 2.0 and 2.1, EMQX 5.8 and HiveMQ CE. `docker-compose.yml` starts each behind a profile — see CONTRIBUTING.md.
+
 ## [2.2.0] - 2026-11-16
 
 ### Changed

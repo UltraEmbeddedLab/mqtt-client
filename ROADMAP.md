@@ -86,9 +86,9 @@ majors.
 
 - **Laravel package** — service provider, config, facade, an `mqtt:listen` Artisan command,
   and queue/event integration. Then a **Symfony bundle**.
-- **Interoperability matrix in CI** — Mosquitto 2.0 and 2.1, EMQX, HiveMQ CE, NanoMQ. (The
-  `eclipse-mosquitto:2` image now resolves to 2.1, whose WebSocket listener rejects every
-  upgrade with the repository's config; that needs sorting out first.)
+- **Interoperability matrix in CI** ✅ — Mosquitto 2.0 and 2.1, EMQX 5.8 and HiveMQ CE run
+  `tests/Interop` on every push (WebSocket on Mosquitto 2.0 and EMQX). Still to add: NanoMQ,
+  and TLS against each.
 - **Coverage of 85 % or more**, and a published mutation score (`pest --mutate`).
 - **A documentation site**, and benchmarks against real brokers alongside other PHP clients.
 - **Async adapter** (ReactPHP / Amp / Revolt). The `Protocol\` namespace is pure and reads

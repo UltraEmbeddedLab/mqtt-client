@@ -32,10 +32,6 @@ jobs:
 
     name: PHP ${{ matrix.php }} Tests
     continue-on-error: ${{ matrix.experimental }}
-    permissions:
-      contents: read
-      # Codecov verifies the upload with GitHub's OIDC token: no secret to set, rotate or leak.
-      id-token: write
 
     env:
       MQTT_HOST: 127.0.0.1
@@ -77,32 +73,102 @@ jobs:
 
       - name: Integration tests must run, not skip
         run: |
-          output=$(vendor/bin/pest --testsuite=Integration 2>&1)
+          # `|| status=$?`: under the runner's `bash -e`, a failing run would end the script
+          # at the assignment, before its output is printed.
+          output=$(vendor/bin/pest --testsuite=Integration 2>&1) && status=0 || status=$?
           echo "$output"
           if echo "$output" | grep -qi "broker not available"; then
             echo "::error::Integration tests skipped despite a running broker"
             exit 1
           fi
+          exit $status
 
       # --min is what makes coverage a gate; without it the run reports and passes.
       # Measured 53.5% with the broker running. Ratchet upward, never down.
       - name: Run tests with coverage
-        run: vendor/bin/pest --coverage --coverage-clover=coverage.xml --min=50
-
-      # A refused upload shows as a failed step without failing the build. Behind
-      # fail_ci_if_error: false it failed on every run ("Token required") and nobody saw.
-      - name: Upload coverage to Codecov
-        if: matrix.php == '8.5'
-        continue-on-error: true
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-        with:
-          files: coverage.xml
-          use_oidc: true
-          fail_ci_if_error: true
+        run: vendor/bin/pest --coverage --min=50
 
       - name: Stop Mosquitto
         if: always()
         run: docker compose down -v
+
+  # tests/Interop against other brokers (the tests job runs it against Mosquitto 2.1). They
+  # differ where it matters: EMQX sends topic aliases to clients and refuses `#` in SUBACK,
+  # which Mosquitto never does, and Mosquitto 2.0 is the one whose WebSocket listener works.
+  # Each runs the client's own scenarios — exactly-once across a dropped link, session
+  # takeover, delayed Will, Maximum Packet Size — so a broker update that changes behaviour
+  # shows here. The images are pinned in docker-compose.yml.
+  interop:
+    runs-on: ubuntu-latest
+    name: Interop · ${{ matrix.broker }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - broker: emqx
+            service: emqx
+            port: 1884
+            ws_port: 8083
+          - broker: hivemq
+            service: hivemq
+            port: 1885
+            ws_port: ''
+          - broker: mosquitto
+            service: mosquitto-2.0
+            port: 1886
+            ws_port: 9002
+
+    env:
+      MQTT_BROKER: ${{ matrix.broker }}
+      MQTT_HOST: 127.0.0.1
+      MQTT_PORT: ${{ matrix.port }}
+      MQTT_WS_PORT: ${{ matrix.ws_port }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.5'
+          extensions: openssl
+          coverage: none
+
+      - name: Start ${{ matrix.service }}
+        run: docker compose --profile ${{ matrix.service }} up -d --wait ${{ matrix.service }}
+
+      - name: Get composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.json') }}
+          restore-keys: ${{ runner.os }}-composer-
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Interop tests must run, not skip
+        run: |
+          output=$(vendor/bin/pest --testsuite=Interop 2>&1) && status=0 || status=$?
+          echo "$output"
+          if echo "$output" | grep -qi "broker not available"; then
+            echo "::error::Interop tests skipped: ${{ matrix.service }} is not reachable on port ${{ matrix.port }}"
+            exit 1
+          fi
+          exit $status
+
+      - name: Broker log
+        if: failure()
+        run: docker compose --profile ${{ matrix.service }} logs --tail 200 ${{ matrix.service }}
+
+      - name: Stop ${{ matrix.service }}
+        if: always()
+        run: docker compose --profile ${{ matrix.service }} down -v
 
   install-on-stock-php:
     runs-on: ubuntu-latest
